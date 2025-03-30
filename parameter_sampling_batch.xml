@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<BatchRunner>
+    <!-- Climate Model Parameters -->
+    <ComponentSet name="climate">
+        <!-- Base case climate parameters -->
+        <FileSet name="base">
+            <Value name="climate-sensitivity">input/climate/base_climate.xml</Value>
+            <Value name="soil-feedback">input/climate/base_climate.xml</Value>
+            <Value name="ocean-flux">input/climate/base_climate.xml</Value>
+        </FileSet>
+        <!-- High climate sensitivity case -->
+        <FileSet name="high_sensitivity">
+            <Value name="climate-sensitivity">input/climate/high_sensitivity.xml</Value>
+            <Value name="soil-feedback">input/climate/base_climate.xml</Value>
+            <Value name="ocean-flux">input/climate/base_climate.xml</Value>
+        </FileSet>
+        <!-- Low climate sensitivity case -->
+        <FileSet name="low_sensitivity">
+            <Value name="climate-sensitivity">input/climate/low_sensitivity.xml</Value>
+            <Value name="soil-feedback">input/climate/base_climate.xml</Value>
+            <Value name="ocean-flux">input/climate/base_climate.xml</Value>
+        </FileSet>
+    </ComponentSet>
+
+    <!-- Economic Parameters -->
+    <ComponentSet name="economic">
+        <!-- Base case economic parameters -->
+        <FileSet name="base">
+            <Value name="social-discount-rate">input/economic/base_economic.xml</Value>
+            <Value name="interest-rate">input/economic/base_economic.xml</Value>
+        </FileSet>
+        <!-- High growth case -->
+        <FileSet name="high_growth">
+            <Value name="social-discount-rate">input/economic/high_growth.xml</Value>
+            <Value name="interest-rate">input/economic/high_growth.xml</Value>
+        </FileSet>
+        <!-- Low growth case -->
+        <FileSet name="low_growth">
+            <Value name="social-discount-rate">input/economic/low_growth.xml</Value>
+            <Value name="interest-rate">input/economic/low_growth.xml</Value>
+        </FileSet>
+    </ComponentSet>
+
+    <!-- Technology Parameters -->
+    <ComponentSet name="technology">
+        <!-- Base case technology parameters -->
+        <FileSet name="base">
+            <Value name="tech-change">input/technology/base_tech.xml</Value>
+            <Value name="capital-cost">input/technology/base_tech.xml</Value>
+        </FileSet>
+        <!-- High tech improvement case -->
+        <FileSet name="high_tech">
+            <Value name="tech-change">input/technology/high_tech.xml</Value>
+            <Value name="capital-cost">input/technology/base_tech.xml</Value>
+        </FileSet>
+        <!-- Low tech improvement case -->
+        <FileSet name="low_tech">
+            <Value name="tech-change">input/technology/low_tech.xml</Value>
+            <Value name="capital-cost">input/technology/base_tech.xml</Value>
+        </FileSet>
+    </ComponentSet>
+
+    <!-- Define how to run scenarios -->
+    <runner-set>
+        <single-scenario-runner/>
+    </runner-set>
+</BatchRunner> 
