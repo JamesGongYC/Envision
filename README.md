@@ -8,23 +8,71 @@ Envision is a framework for parameter sampling and topological analysis of clima
 
 ## Key Components
 
-- **GCAM Extensions**: Enhanced parameter sampling capabilities for the Global Change Analysis Model
+- **Parameter Sampling**: Python-based framework for efficient parameter space exploration
+  - Multiple sampling strategies (Latin Hypercube, Sobol, etc.)
+  - Visualization of parameter distributions
+  - Integration with GCAM's batch mode
+
 - **Topological Data Analysis**: Tools for extracting meaningful structures from high-dimensional model outputs
+  - Persistence homology analysis
+  - Mapper algorithm visualization
+  - Network analysis of topological structures
+
 - **Interpretation Framework**: Methods for translating mathematical structures into policy-relevant insights
 
 ## Project Structure
 
-- `gcam-core/`: The core GCAM model with extensions
-  - `cvs/objects/sampling/`: Parameter sampling framework
-- `analysis/`: Tools for topological data analysis and visualization
+- `gcam-core/`: The core GCAM model
+- `analysis/`: Analysis tools
+  - `sampling/`: Parameter sampling framework
+  - `tda/`: Topological data analysis
+  - `visualization/`: Visualization tools
+  - `interpretation/`: AI-based interpretation
 - `outputs/`: Storage for model outputs and analysis results
+  - `scenarios/`: Raw model outputs
+  - `topology/`: Topological analysis results
+  - `analysis/`: Processed insights
 
 ## Getting Started
 
-1. Set up GCAM according to its documentation
-2. Configure parameter sampling in `parameter_sampling_batch.xml`
-3. Run batch simulations
-4. Analyze results using the topological analysis tools
+### Prerequisites
+
+- Python 3.8+
+- GCAM 5.3+
+- Required Python packages: `numpy`, `pandas`, `pyDOE2`, `sobol_seq`, `gudhi`, `kmapper`, `networkx`
+
+### Installation
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/JamesGongYC/Envision.git
+   ```
+
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Set up GCAM according to its documentation
+
+### Parameter Sampling
+
+Run a sampling workflow:
+```bash
+python analysis/sampling/run_sampling_workflow.py --method lhs --samples 50 --gcam-root path/to/gcam-core
+```
+
+### Analyzing Results
+
+Convert GCAM outputs to TDA format:
+```bash
+python analysis/gcam_to_tda.py --output-dir outputs/scenarios --batch-file parameter_sampling_batch.xml 
+```
+
+Run topological analysis:
+```bash
+# See analysis/README.md for details
+```
 
 ## License
 

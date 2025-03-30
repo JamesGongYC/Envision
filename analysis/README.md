@@ -4,6 +4,11 @@ This directory contains the tools for analyzing GCAM outputs using topological d
 
 ## Structure
 
+- **sampling/**: Parameter sampling tools for GCAM
+  - `sampling_strategies.py`: Implements various sampling methods (LHS, Sobol, etc.)
+  - `parameter_space.py`: Parameter space definition and GCAM integration
+  - `run_sampling_workflow.py`: End-to-end workflow for parameter sampling
+  
 - **tda/**: Topological Data Analysis tools
   - `persistence_analysis.py`: Implements persistence homology analysis
   
@@ -16,6 +21,19 @@ This directory contains the tools for analyzing GCAM outputs using topological d
 - **gcam_to_tda.py**: Converts GCAM outputs to formats suitable for TDA
 
 ## Usage
+
+### Running the Sampling Workflow
+
+```bash
+python sampling/run_sampling_workflow.py --method lhs --samples 50 --gcam-root ../gcam-core
+```
+
+Available sampling methods:
+- `lhs`: Latin Hypercube Sampling
+- `sobol`: Sobol sequence
+- `random`: Random sampling
+- `halton`: Halton sequence
+- `orthogonal`: Orthogonal sampling
 
 ### Converting GCAM Outputs
 
@@ -75,6 +93,8 @@ This framework requires several Python packages:
 - pandas
 - matplotlib
 - scikit-learn
+- pyDOE2 (for sampling)
+- sobol_seq (for Sobol sequences)
 - gudhi (for persistent homology)
 - kmapper (for Mapper algorithm)
 - networkx (for graph analysis)
