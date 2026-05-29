@@ -22,7 +22,7 @@ function formatTime(iso: string | null | undefined): string {
 
 function formatBrier(b: number | null): string {
   if (b === null || b === undefined) return '—';
-  return b.toFixed(3);
+  return b.toFixed(4);
 }
 
 function StatusPill({
@@ -55,7 +55,6 @@ export default async function AgentPage() {
 
   return (
     <div className="container mx-auto px-4 py-6 max-w-5xl space-y-10">
-      {/* Header */}
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Agent log</h1>
         <p className="mt-2 text-sm text-neutral-600 max-w-prose">
@@ -65,7 +64,6 @@ export default async function AgentPage() {
         </p>
       </div>
 
-      {/* System status */}
       <section>
         <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">
           System status
@@ -98,7 +96,6 @@ export default async function AgentPage() {
         </div>
       </section>
 
-      {/* Skill library */}
       <section>
         <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">
           Skill library
@@ -177,7 +174,6 @@ export default async function AgentPage() {
         </p>
       </section>
 
-      {/* Approval queue */}
       <section>
         <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">
           Approval queue
@@ -201,7 +197,6 @@ export default async function AgentPage() {
         )}
       </section>
 
-      {/* Recent activity */}
       <section>
         <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">
           Recent Curator activity
