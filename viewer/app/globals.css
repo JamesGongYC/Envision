@@ -1,0 +1,21 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+/* Envision viewer is always rendered light. The map and disclaimer copy
+   are calibrated for a white background; honoring dark mode would require
+   a parallel palette we don't have time for in v1. */
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* Leaflet map container needs a definite background while tiles load,
+   in case the tile provider is slow or unreachable. */
+.leaflet-container {
+  background: #f5f5f5;
+}
