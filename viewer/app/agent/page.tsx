@@ -213,16 +213,7 @@ export default async function AgentPage() {
           </ul>
         )}
       </section>
-
-      <div className="pt-6 border-t border-neutral-200 text-xs text-neutral-500">
-        This is a read-only view. Approval, rejection, and deployment of
-        Curator proposals are gated behind the operator CLI (
-        <code>tools/review_proposals.py</code>) — see{' '}
-        <Link href="/about" className="underline">
-          about
-        </Link>
-        .
-      </div>
+      
     </div>
   );
 }

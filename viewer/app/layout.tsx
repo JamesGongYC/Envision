@@ -4,10 +4,14 @@ import { DisclaimerBanner } from '@/components/disclaimer-banner';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Envision — experimental disaster signal monitor',
+  title: {
+    default: 'Envision | Continuous self-evolving agent for disaster prediction',
+    template: "%s · Envision",
+  },
   description:
     'Envision is an experimental research artifact exploring self-evolving agent architectures for disaster signal detection. Not an alerting service; do not use for safety-critical decisions.',
 };
+
 
 export default function RootLayout({
   children,
