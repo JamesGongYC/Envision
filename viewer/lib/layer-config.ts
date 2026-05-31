@@ -14,18 +14,20 @@ export type LayerQueryConfig = {
   target: LayerQueryTarget;
   sources: string[];
   signalType?: string;
-  cluster: boolean;
+  /** Canvas renderer for high-density point layers (FIRMS). */
+  useCanvas?: boolean;
   label: string;
 };
 
 export const LAYER_QUERY_CONFIG: Record<LayerId, LayerQueryConfig | null> = {
   forecasts: null,
+  aifs_wind_field: null,
   firms_hotspots: {
     layerId: 'firms_hotspots',
     target: 'signals',
     sources: ['firms_viirs', 'firms_modis'],
     signalType: 'hotspot',
-    cluster: true,
+    useCanvas: true,
     label: 'FIRMS hotspots',
   },
   nws_fire_alerts: {
@@ -33,7 +35,6 @@ export const LAYER_QUERY_CONFIG: Record<LayerId, LayerQueryConfig | null> = {
     target: 'signals',
     sources: ['nws_alerts'],
     signalType: 'fire_warning',
-    cluster: false,
     label: 'NWS fire alerts',
   },
   open_meteo_fire_weather: {
@@ -41,7 +42,6 @@ export const LAYER_QUERY_CONFIG: Record<LayerId, LayerQueryConfig | null> = {
     target: 'signals',
     sources: ['open_meteo'],
     signalType: 'fire_weather',
-    cluster: false,
     label: 'Open-Meteo fire weather',
   },
   ecmwf_fire_weather_grid: {
@@ -49,7 +49,6 @@ export const LAYER_QUERY_CONFIG: Record<LayerId, LayerQueryConfig | null> = {
     target: 'signals',
     sources: ['ecmwf_open_data'],
     signalType: 'fire_weather_grid',
-    cluster: false,
     label: 'ECMWF fire weather grid',
   },
   aifs_fire_weather_grid: {
@@ -57,7 +56,6 @@ export const LAYER_QUERY_CONFIG: Record<LayerId, LayerQueryConfig | null> = {
     target: 'signals',
     sources: ['aifs'],
     signalType: 'fire_weather_grid',
-    cluster: false,
     label: 'AIFS fire weather grid',
   },
   nhc_advisories: {
@@ -65,7 +63,6 @@ export const LAYER_QUERY_CONFIG: Record<LayerId, LayerQueryConfig | null> = {
     target: 'signals',
     sources: ['nhc'],
     signalType: 'cyclone_advisory',
-    cluster: false,
     label: 'NHC advisories',
   },
   jtwc_advisories: {
@@ -73,7 +70,6 @@ export const LAYER_QUERY_CONFIG: Record<LayerId, LayerQueryConfig | null> = {
     target: 'signals',
     sources: ['jtwc'],
     signalType: 'cyclone_advisory',
-    cluster: false,
     label: 'JTWC advisories',
   },
   aifs_cyclone_features: {
@@ -81,7 +77,6 @@ export const LAYER_QUERY_CONFIG: Record<LayerId, LayerQueryConfig | null> = {
     target: 'signals',
     sources: ['aifs'],
     signalType: 'cyclone_feature',
-    cluster: false,
     label: 'AIFS cyclone features',
   },
   aifs_high_wind: {
@@ -89,7 +84,6 @@ export const LAYER_QUERY_CONFIG: Record<LayerId, LayerQueryConfig | null> = {
     target: 'signals',
     sources: ['aifs'],
     signalType: 'high_wind_corridor',
-    cluster: false,
     label: 'AIFS high wind',
   },
   aifs_heavy_precipitation: {
@@ -97,14 +91,12 @@ export const LAYER_QUERY_CONFIG: Record<LayerId, LayerQueryConfig | null> = {
     target: 'signals',
     sources: ['aifs'],
     signalType: 'heavy_precipitation_band',
-    cluster: false,
     label: 'AIFS heavy precipitation',
   },
   gdacs_ground_truth: {
     layerId: 'gdacs_ground_truth',
     target: 'ground_truth',
     sources: ['gdacs'],
-    cluster: false,
     label: 'GDACS events',
   },
 };

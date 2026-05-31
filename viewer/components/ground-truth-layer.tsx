@@ -84,6 +84,7 @@ export function GroundTruthLayer({ config }: { config: LayerQueryConfig }) {
           key={String(f.id ?? `${f.properties?.id}`)}
           feature={f}
           layerId={config.layerId}
+          pane="signalsPane"
         />
       ))}
     </>

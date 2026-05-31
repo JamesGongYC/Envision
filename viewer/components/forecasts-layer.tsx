@@ -4,6 +4,8 @@ import { GeoJSON, Popup, CircleMarker } from 'react-leaflet';
 import type { Forecast } from '@/lib/types';
 import { ForecastDropdown } from '@/components/forecast-dropdown';
 
+const FORECASTS_PANE = 'forecastsPane';
+
 const CLASS_STYLES = {
   wildfire: { stroke: '#dc2626', fill: '#fca5a5' },
   typhoon: { stroke: '#2563eb', fill: '#93c5fd' },
@@ -51,6 +53,7 @@ export function ForecastsLayer({ forecasts }: { forecasts: Forecast[] }) {
           <GeoJSON
             key={`${f.id}-poly`}
             data={f.geometry as GeoJSON.GeoJsonObject}
+            pane={FORECASTS_PANE}
             style={() => ({
               color: style.stroke,
               fillColor: style.fill,
@@ -58,11 +61,6 @@ export function ForecastsLayer({ forecasts }: { forecasts: Forecast[] }) {
               weight: 1.5,
               opacity: 0.85,
             })}
-            eventHandlers={{
-              add: (e) => {
-                e.target.bringToFront();
-              },
-            }}
           />
         );
       })}
@@ -76,17 +74,13 @@ export function ForecastsLayer({ forecasts }: { forecasts: Forecast[] }) {
             key={`${f.id}-marker`}
             center={center}
             radius={7}
+            pane={FORECASTS_PANE}
             pathOptions={{
               color: style.stroke,
               fillColor: style.fill,
               fillOpacity: 0.9,
               weight: 2.5,
               opacity: 1,
-            }}
-            eventHandlers={{
-              add: (e) => {
-                e.target.bringToFront();
-              },
             }}
           >
             <Popup>

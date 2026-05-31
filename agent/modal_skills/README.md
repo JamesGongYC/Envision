@@ -32,7 +32,7 @@ Optional: `JTWC_USER_AGENT` (browser-like string) if JTWC returns 403 from Modal
 | `ecmwf-fire-weather-derived` | 04:00, 16:00 | ECMWF HRES GRIB → fire weather grid polygons |
 | `curator` | 04:00 daily | Brier-driven skill edit proposals |
 | `aifs-cyclone-feature` | 05:00, 17:00 | AIFS MSLP + 850hPa vorticity → cyclone_feature points |
-| `aifs-fire-weather-grid` | 05:10, 17:10 | AIFS +24h → fire_weather_grid polygons |
+| `aifs-fire-weather-grid` | 05:10, 17:10 | AIFS +24h → fire_weather_grid polygons + `wind_fields` (10u/10v for viewer) |
 | `aifs-high-wind-corridor` | 05:15, 17:15 | AIFS +24h wind → high_wind_corridor polygons |
 | `aifs-heavy-precipitation-band` | manual* | AIFS +24h tp → heavy_precipitation_band polygons |
 | `aifs-heat-dome` | manual* | AIFS multi-horizon 2t → heat_dome polygons |

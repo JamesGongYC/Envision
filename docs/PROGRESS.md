@@ -470,3 +470,29 @@ Hermes CLI on Windows: `python -c "import sys; sys.argv=['hermes','cron','list']
 ## v2.5 complete
 
 All 12+ core Modal apps (ingest, detect, evaluate, housekeeping, GDACS, curator) documented in [`agent/modal_skills/README.md`](../agent/modal_skills/README.md). Hermes runtime retired. Viewer ships polygon layers and LLM reasoning dropdown.
+
+---
+
+## v2.6 — Frontend design sprint
+
+**Date:** 2026-05-30
+
+### Backend
+
+- Migration [`db/migrations/005_wind_fields.sql`](../db/migrations/005_wind_fields.sql) — gzipped leaflet-velocity payloads (`wind_fields`).
+- [`agent/modal_skills/_shared/wind_field.py`](../agent/modal_skills/_shared/wind_field.py) — `build_wind_field_json` + `emit_wind_field`; called from [`aifs-fire-weather-grid/run.py`](../agent/modal_skills/aifs-fire-weather-grid/run.py) when `AIFS_EMIT_WIND_FIELD` is true (default).
+- [`viewer/app/api/wind/route.ts`](../viewer/app/api/wind/route.ts) — latest field, gunzip, 6h cache.
+- [`housekeeping-retention`](../agent/modal_skills/housekeeping-retention/run.py) — 14d `wind_fields` retention.
+
+**Operator:** Apply migration 005 on Neon before wind API works. `modal run aifs-fire-weather-grid` still inserts fire grids if `wind_fields` is missing (logs warning). After 005: re-run to seed wind row (~2–5 MB `size_bytes`).
+
+### Frontend
+
+- **D1:** FIRMS measle dots — Canvas renderer on `signalsPane`; removed `react-leaflet-cluster`.
+- **D2:** Polygon layers at all zooms with `dynamicOpacity()`; `polygonsPane` + Canvas GeoJSON.
+- **D3b:** [`wind-layer.tsx`](../viewer/components/wind-layer.tsx) + `leaflet-velocity`; layer `aifs_wind_field` under “Atmospheric flow” (default off).
+- **Panes:** [`map-panes.tsx`](../viewer/components/map-panes.tsx) — signals 400, polygons 500, forecasts 600; wind on default tile pane (~200).
+
+**Build:** `cd viewer && npm run build` — verify locally.
+
+**Operator:** Vercel deploy; visual smoke — FIRMS dots, global polygon tint, wind particles when toggled.

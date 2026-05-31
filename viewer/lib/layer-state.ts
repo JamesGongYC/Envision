@@ -2,11 +2,13 @@ export type LayerCategory =
   | 'wildfires'
   | 'cyclones'
   | 'weather'
+  | 'atmospheric_flow'
   | 'ground_truth'
   | 'forecasts';
 
 export type LayerId =
   | 'forecasts'
+  | 'aifs_wind_field'
   | 'firms_hotspots'
   | 'nws_fire_alerts'
   | 'open_meteo_fire_weather'
@@ -23,6 +25,7 @@ export type LayerVisibility = Record<LayerId, boolean>;
 
 export const ALL_LAYER_IDS: LayerId[] = [
   'forecasts',
+  'aifs_wind_field',
   'firms_hotspots',
   'nws_fire_alerts',
   'open_meteo_fire_weather',
@@ -38,6 +41,7 @@ export const ALL_LAYER_IDS: LayerId[] = [
 
 export const DEFAULT_VISIBILITY: LayerVisibility = {
   forecasts: true,
+  aifs_wind_field: false,
   firms_hotspots: false,
   nws_fire_alerts: false,
   open_meteo_fire_weather: false,
@@ -131,6 +135,17 @@ export const LAYER_TREE: LayerTreeCategory[] = [
       {
         id: 'aifs_heavy_precipitation',
         label: 'AIFS heavy precipitation',
+        enabled: true,
+      },
+    ],
+  },
+  {
+    category: 'atmospheric_flow',
+    label: 'Atmospheric flow',
+    layers: [
+      {
+        id: 'aifs_wind_field',
+        label: 'Surface wind (AIFS +24h)',
         enabled: true,
       },
     ],

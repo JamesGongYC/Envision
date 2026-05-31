@@ -1,8 +1,5 @@
 'use client';
 
-import 'leaflet.markercluster/dist/MarkerCluster.css';
-import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
-
 import { MapContainer, TileLayer } from 'react-leaflet';
 import type { Forecast } from '@/lib/types';
 import { LAYER_QUERY_CONFIG } from '@/lib/layer-config';
@@ -10,8 +7,10 @@ import type { LayerId } from '@/lib/layer-state';
 import { useLayerVisibility } from '@/components/layer-visibility-provider';
 import { ForecastsLayer } from '@/components/forecasts-layer';
 import { GroundTruthLayer } from '@/components/ground-truth-layer';
+import { MapPanes } from '@/components/map-panes';
 import { SignalLayer } from '@/components/signal-layer';
 import { PolygonSignalLayer } from '@/components/polygon-signal-layer';
+import { WindLayer } from '@/components/wind-layer';
 
 const SIGNAL_LAYER_IDS: LayerId[] = [
   'firms_hotspots',
@@ -86,6 +85,8 @@ export default function ForecastMapImpl({
         maxZoom={19}
       />
 
+      <MapPanes />
+      {visibility.aifs_wind_field && <WindLayer />}
       <ActiveSignalLayers />
       <ActivePolygonLayers />
       {visibility.forecasts && <ForecastsLayer forecasts={forecasts} />}

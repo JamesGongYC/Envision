@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import { GeoJSON, useMap, useMapEvents } from 'react-leaflet';
 import type { LayerQueryConfig } from '@/lib/layer-config';
@@ -10,12 +10,16 @@ import { useLayerTruncation } from '@/components/layer-truncation-provider';
 import type { LayerId } from '@/lib/layer-state';
 
 const DEBOUNCE_MS = 250;
-const MIN_ZOOM = 4;
+const POLYGONS_PANE = 'polygonsPane';
 
 function boundsToParam(bounds: L.LatLngBounds): string {
   const sw = bounds.getSouthWest();
   const ne = bounds.getNorthEast();
   return `${sw.lng},${sw.lat},${ne.lng},${ne.lat}`;
+}
+
+function dynamicOpacity(baseOpacity: number, zoom: number): number {
+  return Math.max(0.05, baseOpacity - Math.max(0, 4 - zoom) * 0.05);
 }
 
 function polygonPopup(props: Record<string, unknown>): string {
@@ -38,14 +42,11 @@ export function PolygonSignalLayer({ config }: { config: LayerQueryConfig }) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const style = POLYGON_STYLES[config.layerId] ?? POLYGON_STYLES.ecmwf_fire_weather_grid;
+  const baseStyle =
+    POLYGON_STYLES[config.layerId] ?? POLYGON_STYLES.ecmwf_fire_weather_grid;
+  const canvasRenderer = useMemo(() => L.canvas({ padding: 0.5 }), []);
 
   const fetchLayer = useCallback(async () => {
-    if (map.getZoom() < MIN_ZOOM) {
-      setCollection(null);
-      setTruncation(config.layerId, null);
-      return;
-    }
     const bounds = map.getBounds();
     const bbox = boundsToParam(bounds);
     abortRef.current?.abort();
@@ -99,18 +100,34 @@ export function PolygonSignalLayer({ config }: { config: LayerQueryConfig }) {
     };
   }, [scheduleFetch, config.layerId, setTruncation]);
 
-  if (zoom < MIN_ZOOM || !collection?.features.length) return null;
+  if (!collection?.features.length) return null;
+
+  const fillOpacity = dynamicOpacity(baseStyle.opacity, zoom);
 
   return (
     <GeoJSON
-      key={`${config.layerId}-${collection.features.length}`}
+      key={`${config.layerId}-${collection.features.length}-${zoom}`}
       data={collection as GeoJSON.GeoJsonObject}
+      pane={POLYGONS_PANE}
+      eventHandlers={{
+        add: (e) => {
+          const gj = e.target as L.GeoJSON;
+          const opts = gj.options as L.PathOptions & { renderer?: L.Renderer };
+          opts.renderer = canvasRenderer;
+          gj.eachLayer((child) => {
+            const path = child as L.Path;
+            if (path.options) {
+              path.options.renderer = canvasRenderer;
+            }
+          });
+        },
+      }}
       style={() => ({
-        color: style.stroke,
-        fillColor: style.fill,
-        fillOpacity: style.opacity,
-        weight: style.weight,
-        opacity: 0.85,
+        color: baseStyle.stroke,
+        fillColor: baseStyle.fill,
+        fillOpacity,
+        weight: baseStyle.weight,
+        opacity: Math.min(0.85, fillOpacity + 0.1),
       })}
       onEachFeature={(feature, layer) => {
         const props = (feature.properties ?? {}) as Record<string, unknown>;

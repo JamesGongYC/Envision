@@ -20,6 +20,7 @@ from aifs_common import (
     to_mm,
 )
 from grid import polygons_from_mask
+from wind_field import emit_wind_field, should_emit_wind_field
 
 SKILL_ID = "aifs-fire-weather-grid"
 SIGNAL_TYPE = "fire_weather_grid"
@@ -82,4 +83,31 @@ def run(now: datetime, db: Connection | None = None) -> int:
         )
         for geom, payload in polygons
     ]
-    return run_and_insert(now, db, skill_id=SKILL_ID, rows=rows)
+    n = run_and_insert(now, db, skill_id=SKILL_ID, rows=rows)
+
+    if should_emit_wind_field() and db is not None:
+        emit_wind_field(
+            db,
+            run_time=run_time,
+            valid_at=valid_time,
+            ds_u=fields[("10u", FORECAST_STEP_H)],
+            ds_v=fields[("10v", FORECAST_STEP_H)],
+            skill_id=SKILL_ID,
+        )
+    elif should_emit_wind_field():
+        import psycopg
+
+        from aifs_common import DATABASE_URL
+
+        if DATABASE_URL:
+            with psycopg.connect(DATABASE_URL, autocommit=False) as conn:
+                emit_wind_field(
+                    conn,
+                    run_time=run_time,
+                    valid_at=valid_time,
+                    ds_u=fields[("10u", FORECAST_STEP_H)],
+                    ds_v=fields[("10v", FORECAST_STEP_H)],
+                    skill_id=SKILL_ID,
+                )
+
+    return n

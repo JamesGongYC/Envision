@@ -100,9 +100,13 @@ function popupBody(
 export function SignalFeatureMarker({
   feature,
   layerId,
+  pane,
+  renderer,
 }: {
   feature: GeoJSON.Feature;
   layerId: string;
+  pane?: string;
+  renderer?: L.Renderer;
 }) {
   const props = (feature.properties ?? {}) as Record<string, unknown>;
   const source = String(props.source ?? '');
@@ -119,6 +123,8 @@ export function SignalFeatureMarker({
       <CircleMarker
         center={position}
         radius={style.radius}
+        pane={pane}
+        renderer={renderer}
         pathOptions={{
           color: style.color,
           fillColor: style.fillColor,
@@ -133,7 +139,11 @@ export function SignalFeatureMarker({
   }
 
   return (
-    <Marker position={position} icon={divIcon(style, opacity)}>
+    <Marker
+      position={position}
+      icon={divIcon(style, opacity)}
+      pane={pane}
+    >
       <Popup>{popupBody(props, layerId)}</Popup>
     </Marker>
   );

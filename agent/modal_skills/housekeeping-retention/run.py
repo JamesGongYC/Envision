@@ -39,16 +39,24 @@ def run(now: datetime, db: Connection) -> dict:
         )
         forecasts_deleted = cur.rowcount
 
+        cur.execute(
+            "DELETE FROM wind_fields WHERE valid_at < %s - interval '14 days'",
+            (now,),
+        )
+        wind_fields_deleted = cur.rowcount
+
         cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY signal_catalog")
 
     db.commit()
     result = {
         "signals_deleted": signals_deleted,
         "forecasts_deleted": forecasts_deleted,
+        "wind_fields_deleted": wind_fields_deleted,
     }
     print(
         f"[{SKILL_ID}] deleted {signals_deleted} signals, "
-        f"{forecasts_deleted} forecasts; refreshed signal_catalog."
+        f"{forecasts_deleted} forecasts, {wind_fields_deleted} wind_fields; "
+        "refreshed signal_catalog."
     )
     return result
 

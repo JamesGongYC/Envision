@@ -1,9 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import L from 'leaflet';
 import { useMap, useMapEvents } from 'react-leaflet';
-import MarkerClusterGroup from 'react-leaflet-cluster';
 import type { LayerId } from '@/lib/layer-state';
 import type { LayerQueryConfig } from '@/lib/layer-config';
 import type { GeoJSONFeatureCollection } from '@/lib/signal-queries';
@@ -11,6 +10,7 @@ import { useLayerTruncation } from '@/components/layer-truncation-provider';
 import { SignalFeatureMarker } from '@/components/signal-marker';
 
 const DEBOUNCE_MS = 250;
+const SIGNALS_PANE = 'signalsPane';
 
 function boundsToParam(bounds: L.LatLngBounds): string {
   const sw = bounds.getSouthWest();
@@ -18,11 +18,7 @@ function boundsToParam(bounds: L.LatLngBounds): string {
   return `${sw.lng},${sw.lat},${ne.lng},${ne.lat}`;
 }
 
-export function SignalLayer({
-  config,
-}: {
-  config: LayerQueryConfig;
-}) {
+export function SignalLayer({ config }: { config: LayerQueryConfig }) {
   const map = useMap();
   const { setTruncation } = useLayerTruncation();
   const [collection, setCollection] = useState<GeoJSONFeatureCollection | null>(
@@ -30,6 +26,11 @@ export function SignalLayer({
   );
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  const canvasRenderer = useMemo(
+    () => (config.useCanvas ? L.canvas({ padding: 0.5 }) : undefined),
+    [config.useCanvas]
+  );
 
   const fetchLayer = useCallback(async () => {
     const bounds = map.getBounds();
@@ -63,9 +64,7 @@ export function SignalLayer({
 
   const scheduleFetch = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      void fetchLayer();
-    }, DEBOUNCE_MS);
+    timerRef.current = setTimeout(() => void fetchLayer(), DEBOUNCE_MS);
   }, [fetchLayer]);
 
   useMapEvents({
@@ -85,20 +84,6 @@ export function SignalLayer({
   const features = collection?.features ?? [];
   if (features.length === 0) return null;
 
-  if (config.cluster) {
-    return (
-      <MarkerClusterGroup chunkedLoading maxClusterRadius={40}>
-        {features.map((f) => (
-          <SignalFeatureMarker
-            key={String(f.id ?? `${f.properties?.id}`)}
-            feature={f}
-            layerId={config.layerId}
-          />
-        ))}
-      </MarkerClusterGroup>
-    );
-  }
-
   return (
     <>
       {features.map((f) => (
@@ -106,6 +91,8 @@ export function SignalLayer({
           key={String(f.id ?? `${f.properties?.id}`)}
           feature={f}
           layerId={config.layerId}
+          pane={SIGNALS_PANE}
+          renderer={canvasRenderer}
         />
       ))}
     </>
