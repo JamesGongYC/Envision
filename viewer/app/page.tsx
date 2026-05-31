@@ -1,4 +1,5 @@
 import ForecastMap from '@/components/forecast-map';
+import { MapLayerPanel } from '@/components/map-layer-panel';
 import { getActiveForecasts } from '@/lib/queries';
 
 export const revalidate = 60;
@@ -21,6 +22,7 @@ export default async function HomePage() {
   return (
     <div className="relative" style={{ height: MAP_HEIGHT }}>
       <ForecastMap forecasts={forecasts} />
+      <MapLayerPanel />
 
       {/* Status badge — top-left */}
       <div className="absolute top-4 left-4 z-[400] bg-white/95 backdrop-blur px-3 py-2 rounded shadow-sm border border-neutral-200 text-xs">
@@ -40,8 +42,8 @@ export default async function HomePage() {
         )}
       </div>
 
-      {/* Legend — top-right */}
-      <div className="absolute top-4 right-4 z-[400] bg-white/95 backdrop-blur px-3 py-2 rounded shadow-sm border border-neutral-200 text-xs space-y-1">
+      {/* Legend — left side (layer panel is top-right) */}
+      <div className="absolute top-4 left-4 z-[400] mt-20 bg-white/95 backdrop-blur px-3 py-2 rounded shadow-sm border border-neutral-200 text-xs space-y-1 max-w-[11rem]">
         <div className="flex items-center gap-1.5">
           <span className="inline-block h-3 w-3 rounded-sm border-2 border-red-600 bg-red-300/70" />
           <span>Wildfire</span>

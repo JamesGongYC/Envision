@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { DisclaimerBanner } from '@/components/disclaimer-banner';
+import { ClientProviders } from '@/components/providers';
 import { StatusHeader } from '@/components/status-header';
 import './globals.css';
 
@@ -51,7 +52,9 @@ export default function RootLayout({
             </Link>
           </nav>
         </header>
-        <main className="flex-1 min-h-0">{children}</main>
+        <main className="flex-1 min-h-0">
+          <ClientProviders>{children}</ClientProviders>
+        </main>
       </body>
     </html>
   );

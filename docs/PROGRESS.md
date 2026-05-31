@@ -345,3 +345,52 @@ Smoke (2026-05-30): `sync_skills.py --apply` copies `trace_builder.py` to detect
 
 - `cd viewer && npm run build` — verify locally before Vercel deploy.
 - Deploy: push to Vercel-connected branch or `vercel deploy` from `viewer/`.
+
+---
+
+## v2.5 Day 1 — Foundation (Track A + Track B)
+
+**Date:** 2026-05-30
+
+### Track A — Modal migrations
+
+Three Hermes skills copied to Modal (`run.py` unchanged; `app.py` uses `envision-neon` + `add_local_dir`):
+
+| App | Schedule (UTC) | Smoke (2026-05-30) |
+|---|---|---|
+| [`housekeeping-retention`](../agent/modal_skills/housekeeping-retention/) | `0 6 * * *` | `deleted 0 signals, 0 forecasts; refreshed signal_catalog` |
+| [`gdacs-ground-truth`](../agent/modal_skills/gdacs-ground-truth/) | `0 */6 * * *` | inserted 1 GDACS event (13 feed items) |
+| [`forecast-evaluator`](../agent/modal_skills/forecast-evaluator/) | `0 7 * * *` | wrote 2 evaluations (0 hits, 2 fp) |
+
+Modal smoke runs (workspace `jamesgongyc`):
+
+- housekeeping: https://modal.com/apps/jamesgongyc/main/ap-4rQatJkW8J9yoJkRD1zZPr
+- gdacs: https://modal.com/apps/jamesgongyc/main/ap-7io1LqP3gPx3BotkuQtbVV
+- evaluator: https://modal.com/apps/jamesgongyc/main/ap-EhH5fj8bVo6IuiQrS7gaxe
+
+**Deploy:** `modal deploy` for all three failed with *reached limit of 5 cron jobs* (5 already deployed). Upgrade workspace plan, then:
+
+```bash
+python -m modal deploy agent/modal_skills/housekeeping-retention/app.py
+python -m modal deploy agent/modal_skills/gdacs-ground-truth/app.py
+python -m modal deploy agent/modal_skills/forecast-evaluator/app.py
+```
+
+**Hermes cron retirement** (this machine): removed `f41076a4d5ca` (housekeeping-retention), `3fbdbad81f17` (GDACS ground truth), `5637caebb1df` (forecast_evaluator). `hermes cron list` → **7** active jobs (FIRMS, NWS, NHC, 4 detectors). Open-Meteo / JTWC crons were not registered here (plan baseline 12 assumed full v2 Day 2 set).
+
+Hermes CLI on Windows: `python -c "import sys; sys.argv=['hermes','cron','list']; from hermes_cli.main import main; main()"` (wrong `pip install hermes` shadows `hermes-agent`; avoid).
+
+`agent/skills/` and `sync_skills.py` **not** archived (v2.5 Day 3).
+
+### Track B — Map layer architecture
+
+- [`viewer/lib/layer-state.ts`](../viewer/lib/layer-state.ts): `LAYER_TREE`, `DEFAULT_VISIBILITY` (forecasts on; signals off).
+- [`viewer/components/layer-visibility-provider.tsx`](../viewer/components/layer-visibility-provider.tsx): context + `localStorage['envision.layers']`.
+- [`viewer/components/map-layer-panel.tsx`](../viewer/components/map-layer-panel.tsx): collapsible panel, disabled placeholders for Day 2+ layers.
+- [`viewer/components/forecasts-layer.tsx`](../viewer/components/forecasts-layer.tsx): extracted forecast polygons/markers; gated in [`forecast-map-impl.tsx`](../viewer/components/forecast-map-impl.tsx) via `visibility.forecasts`.
+- [`viewer/components/providers.tsx`](../viewer/components/providers.tsx) mounted in [`viewer/app/layout.tsx`](../viewer/app/layout.tsx).
+- [`viewer/app/page.tsx`](../viewer/app/page.tsx): `<MapLayerPanel />`; legend moved to left under status badge.
+
+**Build:** `cd viewer && npm run build` — passed (Next.js 16.2.6).
+
+**Manual smoke:** toggle Active forecasts off/on; reload persists `envision.layers`. Vercel preview deploy — operator.
