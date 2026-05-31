@@ -37,7 +37,7 @@ All 10 existing skills refactored to expose `def run(now: datetime, db: Connecti
 | typhoon-intensifying | `detect_typhoon_intensifying.py` |
 | typhoon-landfall-imminent | `detect_typhoon_landfall.py` |
 | forecast-evaluator | `evaluate_forecasts.py` |
-| curator | `run_curator.py` |
+| curator | Modal: `agent/modal_skills/curator/run.py` (Hermes copy retired Day 4) |
 
 Detection skills parameterize SQL `now()` and add `AND timestamp <= %s` on all `signals` queries. Ingestion skills stamp `ingested_at = now`.
 
@@ -164,3 +164,184 @@ Active sources (FIRMS ×2, NWS, Open-Meteo) have recent data; NHC absent (pre-se
 
 - Reviewed [`viewer/lib/signal-sources.ts`](../viewer/lib/signal-sources.ts): `open_meteo` (CC BY 4.0) and `jtwc` (public domain) entries present with correct URLs.
 - `cd viewer && npm run build` — clean (Next.js 16.2.6, TypeScript OK).
+
+---
+
+## v2 Day 4 complete
+
+**Date:** 2026-05-30
+
+### D1 — Modal infrastructure
+
+- Secret `envision-neon` created on Modal (`DATABASE_URL`, `ANTHROPIC_API_KEY`, `ENVISION_CURATOR_ENABLED`).
+- [`agent/modal_skills/README.md`](../agent/modal_skills/README.md) documents Modal-native skills (bypass `sync_skills.py`).
+
+### D2 — ECMWF `ecmwf-fire-weather-derived`
+
+- Modal app: GRIB download via `ecmwf-opendata`, cfgrib parse, 0–4 fire weather score, polygon aggregation.
+- Smoke + deploy: **93** `ecmwf_open_data` / `fire_weather_grid` polygons (2026-05-30 00Z cycle, valid 2026-05-31).
+- Schedule: **04:00 + 16:00 UTC** (`modal.Cron("0 4,16 * * *")`).
+- Pin: `cfgrib==0.9.15.0`, `eccodes==2.39.1`.
+- Batch insert + reconnect fix for Neon idle drops during polygon processing.
+
+### D3 — Curator migration
+
+- Canonical code: [`agent/modal_skills/curator/run.py`](../agent/modal_skills/curator/run.py).
+- Skills staging harness copies detection scripts to `~/.hermes/skills/` in-container.
+- Hermes `curate: curator` cron removed; `agent/skills/curator/` deleted; runtime pruned.
+- Smoke: 1 proposal inserted (`wildfire_rapid_growth`); 1 skipped (pending proposal exists).
+- Schedule: **04:00 UTC** daily.
+
+### D4 — Deploy + verification
+
+| Check | Result |
+|---|---|
+| ECMWF signals | 93 rows, max valid time 2026-05-31 |
+| Pending proposals | 2 |
+| `signal_catalog` | `(ecmwf_open_data, fire_weather_grid, 93)` |
+| `signals` volume | 7639 rows, **7208 kB** |
+
+Deployed:
+- https://modal.com/apps/jamesgongyc/main/deployed/ecmwf-fire-weather-derived
+- https://modal.com/apps/jamesgongyc/main/deployed/curator
+
+### D5 — Documentation
+
+- [`docs/METHODS.md`](METHODS.md): ECMWF derived index + Modal curator/kill-switch paths.
+- [`docs/SAFETY.md`](SAFETY.md): Modal secret kill-switch instructions.
+- [`viewer/lib/signal-sources.ts`](../viewer/lib/signal-sources.ts): `ecmwf_open_data` attribution (CC BY 4.0).
+
+### v2.5 note
+
+Remaining 9 Hermes skills (FIRMS, NWS, detectors, evaluator, housekeeping) migrate to Modal at v2 close. `wildfire-risk-elevated` ECMWF consumption deferred to v2.5.
+
+---
+
+## v2 Day 5 complete
+
+**Date:** 2026-05-30
+
+### D0 — Shared AIFS module
+
+- [`agent/modal_skills/_shared/`](../agent/modal_skills/_shared/): `aifs_common.py` (download, parse, insert), `grid.py` (polygon aggregation), `image.py` (pinned Modal image).
+
+### D1 — Five Modal skills
+
+| Skill | Smoke insert | Schedule (UTC) |
+|---|---:|---|
+| `aifs-cyclone-feature` | 32 | 05:00, 17:00 |
+| `aifs-fire-weather-grid` | 53 | 05:10, 17:10 |
+| `aifs-high-wind-corridor` | 33 | 05:15, 17:15 |
+| `aifs-heavy-precipitation-band` | 25 | 05:20, 17:20 |
+| `aifs-heat-dome` | 8 | 05:25, 17:25 |
+
+All write `source='aifs'` to `signals`. Cyclone vorticity derived from 850 hPa u/v (AIFS has no `vo` on Open Data).
+
+### D3 — Deploy + verification
+
+| Check | Result |
+|---|---|
+| `signal_catalog` (aifs) | 5 rows: cyclone_feature (32), fire_weather_grid (53), high_wind_corridor (33), heavy_precipitation_band (25), heat_dome (8) |
+| Total signals volume | 7824 rows, **7352 kB** |
+| Modal deploy | 5/5 apps deployed; **3/5 on cron** (workspace limit 5: ECMWF + curator + cyclone + fire-weather + wind). `heavy-precipitation-band` + `heat-dome` deployed **manual-trigger** until plan upgrade |
+
+Deployed (all five):
+- https://modal.com/apps/jamesgongyc/main/deployed/aifs-cyclone-feature
+- https://modal.com/apps/jamesgongyc/main/deployed/aifs-fire-weather-grid
+- https://modal.com/apps/jamesgongyc/main/deployed/aifs-high-wind-corridor
+- https://modal.com/apps/jamesgongyc/main/deployed/aifs-heavy-precipitation-band (manual cron)
+- https://modal.com/apps/jamesgongyc/main/deployed/aifs-heat-dome (manual cron)
+
+### D4 — Viewer
+
+- [`viewer/lib/signal-sources.ts`](../viewer/lib/signal-sources.ts): `aifs` attribution entry.
+- `cd viewer && npm run build` — clean.
+
+### D5 — Documentation
+
+- [`docs/METHODS.md`](METHODS.md): AIFS five-skill table + algorithms.
+- [`agent/modal_skills/README.md`](../agent/modal_skills/README.md): 7 Modal apps documented.
+
+### v2 substrate note
+
+`signal_catalog` gains **5** `(aifs, signal_type)` pairs. Combined with Day 4 ECMWF, substrate now includes model-derived fire weather from two sources intentionally.
+
+---
+
+## v2 Day 6 complete
+
+**Date:** 2026-05-30
+
+### D1 — Authoritative trace schemas
+
+- [`docs/TRACES.md`](TRACES.md) finalized: per-skill sub-fields, 12 KB soft cap / 16 KB hard cap, truncation order, do-not-include list.
+
+### D2 — Shared `TraceBuilder`
+
+- New [`agent/lib/trace_builder.py`](../agent/lib/trace_builder.py): `TraceBuilder`, `CuratorTraceBuilder`.
+- Tests: [`agent/lib/test_trace_builder.py`](../agent/lib/test_trace_builder.py) (6 cases, all pass).
+- [`tools/sync_skills.py`](../tools/sync_skills.py): copies `trace_builder.py` into each `detect/` skill `scripts/` on `--apply`.
+- [`agent/modal_skills/curator/app.py`](../agent/modal_skills/curator/app.py): mounts `agent/lib` at `/root/agent_lib`.
+
+### D3 — Detection skill instrumentation
+
+All four Hermes detection skills insert `forecasts.trace` via `TraceBuilder`:
+
+| Skill | Script |
+|---|---|
+| `wildfire_rapid_growth` | `detect_wildfire_rapid_growth.py` |
+| `typhoon_intensifying` | `detect_typhoon_intensifying.py` |
+| `typhoon_landfall_imminent` | `detect_typhoon_landfall.py` |
+| `wildfire_risk_elevated` | `detect_wildfire_risk.py` |
+
+Run after deploy: `python tools/sync_skills.py --apply`, then each `detect_*.py` script; spot-check with `tools/validate_traces.py`.
+
+Smoke (2026-05-30): `sync_skills.py --apply` copies `trace_builder.py` to detect skills; DB round-trip insert with full trace JSONB succeeded; live detector runs exit 0 (no matching cells/alerts this cycle — traces appear on next forecast write). `validate_traces.py --hours 168` passes with WARN on legacy `{}` traces and off-season typhoon rows.
+
+### D4 — Curator trace
+
+- [`agent/modal_skills/curator/run.py`](../agent/modal_skills/curator/run.py): `curator_trace` on insert (`brier_stats_observed`, `ast_validation`, prompt hash, LLM response).
+- Redeploy: `python -m modal deploy agent/modal_skills/curator/app.py`
+
+### D5 — Validation tooling
+
+- New [`tools/validate_traces.py`](../tools/validate_traces.py): samples 5 rows per component / 24h window.
+
+### D6 — Documentation
+
+- [`docs/METHODS.md`](METHODS.md): §4b traces.
+- v3 prerequisite **#2** satisfied ([`docs/v3_plan.md`](v3_plan.md) §11): mutator can read `forecasts.trace` and `curator_trace` on new rows.
+
+---
+
+## v2 Day 7 complete
+
+**Date:** 2026-05-30
+
+### D1 — Status header
+
+- [`viewer/components/status-header.tsx`](../viewer/components/status-header.tsx): skills active (24h), last ingestion, curator activity inferred from `max(proposed_at)` (stale if &gt;30h).
+- [`viewer/lib/time-ago.ts`](../viewer/lib/time-ago.ts), new queries in [`viewer/lib/agent-queries.ts`](../viewer/lib/agent-queries.ts).
+- Wired in [`viewer/app/layout.tsx`](../viewer/app/layout.tsx) above disclaimer; `revalidate = 60`.
+
+### D2 — Skill metadata
+
+- [`viewer/lib/skill-metadata.ts`](../viewer/lib/skill-metadata.ts): 16 entries (4 detection, 8 ingestion incl. `aifs-overlay`, evaluator, curator, housekeeping).
+
+### D3–D5 — `/agent` ops surface
+
+- [`viewer/components/skill-card.tsx`](../viewer/components/skill-card.tsx) grid replaces stats table.
+- [`viewer/app/agent/page.tsx`](../viewer/app/agent/page.tsx): locked 4-sentence explainer; 30-day Brier/hits/FP via `buildSkillCards()`.
+
+### D4 — Sparkline
+
+- [`viewer/components/brier-sparkline.tsx`](../viewer/components/brier-sparkline.tsx): bars (2–3 versions), polyline (≥4), y-cap at 0.5 with clip marker.
+
+### D6 — Tooltips
+
+- [`viewer/lib/tooltips.ts`](../viewer/lib/tooltips.ts); mirrored on [`viewer/app/about/page.tsx`](../viewer/app/about/page.tsx) and [`docs/METHODS.md`](METHODS.md).
+
+### D7 — Build
+
+- `cd viewer && npm run build` — verify locally before Vercel deploy.
+- Deploy: push to Vercel-connected branch or `vercel deploy` from `viewer/`.

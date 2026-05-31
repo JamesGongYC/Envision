@@ -19,14 +19,24 @@ Gated by `ENVISION_CURATOR_ENABLED`. Default-on; set to `false` to halt.
 """
 from __future__ import annotations
 
+import argparse
 import ast
+import hashlib
+import json
 import os
 import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import psycopg
 from anthropic import Anthropic
+from psycopg import Connection
+
+_LIB = Path(__file__).resolve().parents[2] / "lib"
+if _LIB.is_dir() and str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
+from trace_builder import CuratorTraceBuilder  # noqa: E402
 
 # --- config --------------------------------------------------------------
 SKILL_ID = "curator"
@@ -60,6 +70,16 @@ if not ANTHROPIC_API_KEY:
     sys.exit(2)
 
 
+def parse_now(argv: list[str] | None = None) -> datetime:
+    p = argparse.ArgumentParser(description="Run the Envision Curator")
+    p.add_argument("--now", default=None, help="ISO8601 UTC run time (default: now)")
+    args = p.parse_args(argv)
+    if args.now is None:
+        return datetime.now(timezone.utc)
+    dt = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 # --- kill switch ---------------------------------------------------------
 def is_curator_enabled() -> bool:
     """Mirror tools/check_status.py. Default ON."""
@@ -70,7 +90,7 @@ def is_curator_enabled() -> bool:
 
 
 # --- data access ---------------------------------------------------------
-def load_per_skill_stats(conn) -> list[tuple]:
+def load_per_skill_stats(conn: Connection, now: datetime) -> list[tuple]:
     """Return [(skill_id, version, n_evals, mean_brier, hits, fp), ...]
     for evaluations in the last 14 days."""
     with conn.cursor() as cur:
@@ -87,11 +107,51 @@ def load_per_skill_stats(conn) -> list[tuple]:
                 AS false_positives
             FROM evaluations e
             JOIN forecasts f ON f.id = e.forecast_id
-            WHERE e.evaluated_at > now() - interval '14 days'
+            WHERE e.evaluated_at > %s - interval '14 days'
             GROUP BY f.skill_id
-            """
+            """,
+            (now,),
         )
         return cur.fetchall()
+
+
+def load_brier_stats_30d(conn: Connection, now: datetime) -> dict[str, dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              f.skill_id,
+              COUNT(*)::int AS n_evaluations,
+              AVG(e.brier_contribution)::float AS mean_brier
+            FROM evaluations e
+            JOIN forecasts f ON f.id = e.forecast_id
+            WHERE e.evaluated_at > %s - interval '30 days'
+            GROUP BY f.skill_id
+            """,
+            (now,),
+        )
+        return {
+            row[0]: {"brier_30d": float(row[2]), "eval_count_30d": int(row[1])}
+            for row in cur.fetchall()
+        }
+
+
+def build_brier_stats_observed(
+    rows_14d: list[tuple],
+    stats_30d: dict[str, dict],
+) -> dict[str, dict]:
+    observed: dict[str, dict] = {}
+    for skill_id, _version, n_evals, mean_brier, hits, fp in rows_14d:
+        entry = {
+            "brier_14d": round(float(mean_brier), 4),
+            "eval_count": int(n_evals),
+            "hits": int(hits),
+            "false_positives": int(fp),
+        }
+        if skill_id in stats_30d:
+            entry.update(stats_30d[skill_id])
+        observed[skill_id] = entry
+    return observed
 
 
 def has_pending_proposal(conn, skill_id: str, version: int) -> bool:
@@ -110,29 +170,32 @@ def has_pending_proposal(conn, skill_id: str, version: int) -> bool:
 
 
 def insert_proposal(
-    conn,
+    conn: Connection,
     skill_id: str,
     current_version: int,
     proposed_code: str,
     reasoning: str,
+    now: datetime,
+    curator_trace: dict,
 ) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO skill_edit_proposals (
               id, proposed_at, skill_id, current_version,
-              proposed_code, curator_reasoning, status
+              proposed_code, curator_reasoning, status, curator_trace
             ) VALUES (
-              %s, %s, %s, %s, %s, %s, 'pending'
+              %s, %s, %s, %s, %s, %s, 'pending', %s::jsonb
             )
             """,
             (
                 str(uuid.uuid4()),
-                datetime.now(timezone.utc),
+                now,
                 skill_id,
                 current_version,
                 proposed_code,
                 reasoning,
+                json.dumps(curator_trace),
             ),
         )
 
@@ -232,6 +295,16 @@ PROPOSE_TOOL = {
 }
 
 
+def serialize_llm_response(response) -> str:
+    parts: list[str] = []
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            parts.append(getattr(block, "text", ""))
+        elif getattr(block, "type", None) == "tool_use":
+            parts.append(json.dumps(block.input, ensure_ascii=False))
+    return "\n".join(parts) or str(response)
+
+
 def call_curator_llm(
     client: Anthropic,
     skill_id: str,
@@ -240,22 +313,18 @@ def call_curator_llm(
     mean_brier: float,
     hits: int,
     fp: int,
-) -> tuple[str, str]:
-    """Returns (reasoning, proposed_code)."""
+) -> tuple[str, str, object, str]:
+    """Returns (reasoning, proposed_code, response, user_prompt)."""
+    user_prompt = build_user_prompt(
+        skill_id, code, n_evals, mean_brier, hits, fp
+    )
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
         tools=[PROPOSE_TOOL],
         tool_choice={"type": "tool", "name": "propose_skill_edit"},
-        messages=[
-            {
-                "role": "user",
-                "content": build_user_prompt(
-                    skill_id, code, n_evals, mean_brier, hits, fp
-                ),
-            }
-        ],
+        messages=[{"role": "user", "content": user_prompt}],
     )
 
     tool_block = next(
@@ -265,31 +334,39 @@ def call_curator_llm(
         raise RuntimeError("LLM did not return a tool_use block")
 
     inp = tool_block.input
-    return inp["reasoning"], inp["proposed_code"]
+    return inp["reasoning"], inp["proposed_code"], response, user_prompt
 
 
 # --- validation ----------------------------------------------------------
-def is_valid_python(source: str) -> bool:
+def validate_python(source: str) -> tuple[bool, list[str], list[str]]:
+    warnings: list[str] = []
+    errors: list[str] = []
     try:
         ast.parse(source)
-        return True
-    except SyntaxError:
-        return False
+    except SyntaxError as e:
+        errors.append(str(e))
+        return False, warnings, errors
+    return True, warnings, errors
+
+
+def is_valid_python(source: str) -> bool:
+    passed, _, _ = validate_python(source)
+    return passed
 
 
 def is_no_op(current: str, proposed: str) -> bool:
     return current.strip() == proposed.strip()
 
 
-# --- main ----------------------------------------------------------------
-def main() -> int:
+# --- run -----------------------------------------------------------------
+def run(now: datetime, db: Connection) -> dict:
     if not is_curator_enabled():
         print(
             f"[{SKILL_ID}] disabled by kill switch "
             f"(ENVISION_CURATOR_ENABLED={os.environ.get(CURATOR_ENABLED_VAR)}); "
             f"exiting."
         )
-        return 0
+        return {"considered": 0, "proposed": 0, "skipped": 0}
 
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -297,94 +374,118 @@ def main() -> int:
     proposed = 0
     skipped = 0
 
-    with psycopg.connect(DATABASE_URL, autocommit=False) as conn:
-        rows = load_per_skill_stats(conn)
-        if not rows:
+    rows = load_per_skill_stats(db, now)
+    stats_30d = load_brier_stats_30d(db, now)
+    brier_observed = build_brier_stats_observed(rows, stats_30d)
+    if not rows:
+        print(
+            f"[{SKILL_ID}] no evaluations in last 14 days; "
+            f"nothing to consider."
+        )
+        return {"considered": 0, "proposed": 0, "skipped": 0}
+
+    for skill_id, version, n_evals, mean_brier, hits, fp in rows:
+        if skill_id not in MUTABLE_SKILLS:
+            continue
+
+        if n_evals < MIN_EVALUATIONS_TO_CONSIDER:
             print(
-                f"[{SKILL_ID}] no evaluations in last 14 days; "
-                f"nothing to consider."
+                f"[{SKILL_ID}] {skill_id} v{version}: "
+                f"only {n_evals} evaluations; skipping."
             )
-            return 0
+            skipped += 1
+            continue
 
-        for skill_id, version, n_evals, mean_brier, hits, fp in rows:
-            if skill_id not in MUTABLE_SKILLS:
-                continue
-
-            if n_evals < MIN_EVALUATIONS_TO_CONSIDER:
-                print(
-                    f"[{SKILL_ID}] {skill_id} v{version}: "
-                    f"only {n_evals} evaluations; skipping."
-                )
-                skipped += 1
-                continue
-
-            if has_pending_proposal(conn, skill_id, version):
-                print(
-                    f"[{SKILL_ID}] {skill_id} v{version}: "
-                    f"already has a pending proposal; skipping."
-                )
-                skipped += 1
-                continue
-
-            script_path = find_skill_script(skill_id)
-            if not script_path:
-                print(
-                    f"[{SKILL_ID}] {skill_id}: cannot locate script "
-                    f"on disk; skipping."
-                )
-                skipped += 1
-                continue
-
-            with open(script_path, encoding="utf-8") as f:
-                current_code = f.read()
-
-            considered += 1
+        if has_pending_proposal(db, skill_id, version):
             print(
-                f"[{SKILL_ID}] {skill_id} v{version}: calling LLM "
-                f"(n={n_evals}, brier={mean_brier:.3f}, "
-                f"hits={hits}, fp={fp})..."
+                f"[{SKILL_ID}] {skill_id} v{version}: "
+                f"already has a pending proposal; skipping."
             )
+            skipped += 1
+            continue
 
-            try:
-                reasoning, proposed_code = call_curator_llm(
-                    client, skill_id, current_code,
-                    n_evals, mean_brier, hits, fp,
-                )
-            except Exception as e:  # noqa: BLE001
-                print(
-                    f"[{SKILL_ID}] {skill_id}: LLM call failed: {e}"
-                )
-                continue
-
-            if is_no_op(current_code, proposed_code):
-                print(
-                    f"[{SKILL_ID}] {skill_id}: LLM proposed no-op. "
-                    f"Reasoning: {reasoning[:120]}"
-                )
-                continue
-
-            if not is_valid_python(proposed_code):
-                print(
-                    f"[{SKILL_ID}] {skill_id}: proposed code is not "
-                    f"valid Python; rejecting."
-                )
-                continue
-
-            insert_proposal(
-                conn, skill_id, version, proposed_code, reasoning
-            )
-            proposed += 1
+        script_path = find_skill_script(skill_id)
+        if not script_path:
             print(
-                f"[{SKILL_ID}] {skill_id}: proposal recorded. "
+                f"[{SKILL_ID}] {skill_id}: cannot locate script "
+                f"on disk; skipping."
+            )
+            skipped += 1
+            continue
+
+        with open(script_path, encoding="utf-8") as f:
+            current_code = f.read()
+
+        considered += 1
+        print(
+            f"[{SKILL_ID}] {skill_id} v{version}: calling LLM "
+            f"(n={n_evals}, brier={mean_brier:.3f}, "
+            f"hits={hits}, fp={fp})..."
+        )
+
+        try:
+            reasoning, proposed_code, response, user_prompt = call_curator_llm(
+                client, skill_id, current_code,
+                n_evals, mean_brier, hits, fp,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"[{SKILL_ID}] {skill_id}: LLM call failed: {e}"
+            )
+            continue
+
+        passed, warnings, errors = validate_python(proposed_code)
+        if is_no_op(current_code, proposed_code):
+            warnings.append("proposed_code_identical_to_current")
+            print(
+                f"[{SKILL_ID}] {skill_id}: LLM proposed no-op. "
                 f"Reasoning: {reasoning[:120]}"
             )
+            continue
 
-        conn.commit()
+        if not passed:
+            print(
+                f"[{SKILL_ID}] {skill_id}: proposed code is not "
+                f"valid Python; rejecting."
+            )
+            continue
+
+        ctb = CuratorTraceBuilder()
+        ctb.set_brier_stats(brier_observed)
+        ctb.set_ast_validation(passed=True, warnings=warnings, errors=errors)
+        ctb.set_llm_hash(
+            hashlib.sha256(user_prompt.encode("utf-8")).hexdigest()[:16]
+        )
+        ctb.set_llm_response(serialize_llm_response(response))
+
+        insert_proposal(
+            db,
+            skill_id,
+            version,
+            proposed_code,
+            reasoning,
+            now,
+            ctb.build(),
+        )
+        proposed += 1
+        print(
+            f"[{SKILL_ID}] {skill_id}: proposal recorded. "
+            f"Reasoning: {reasoning[:120]}"
+        )
+
+    db.commit()
 
     print(
         f"[{SKILL_ID}] done. considered={considered} proposed={proposed} "
         f"skipped={skipped}."
     )
+    return {"considered": considered, "proposed": proposed, "skipped": skipped}
+
+
+def main() -> int:
+    now = parse_now()
+    with psycopg.connect(DATABASE_URL, autocommit=False) as db:
+        run(now, db)
     return 0
 
 

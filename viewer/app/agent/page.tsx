@@ -1,13 +1,21 @@
-import Link from 'next/link';
 import {
+  buildSkillCards,
   getRecentProposals,
-  getSkillRegistry,
   getSystemStatus,
 } from '@/lib/agent-queries';
 import { isCuratorEnabled } from '@/lib/kill-switch';
-import { SKILL_METADATA } from '@/lib/skill-metadata';
+import { getSkillMetadata } from '@/lib/skill-metadata';
+import { SkillCard } from '@/components/skill-card';
 
 export const revalidate = 60;
+
+const AGENT_EXPLAINER =
+  'Envision is an experimental, self-evolving agent system that monitors ' +
+  'global wildfires and tropical cyclones. Detection skills consume signals ' +
+  'from public data sources and emit probabilistic forecasts; an evaluator ' +
+  'scores forecasts against ground truth events; a curator periodically ' +
+  'proposes refinements to the skill library, gated by operator review. ' +
+  'The system is research, not a calibrated alerting product.';
 
 function formatTime(iso: string | null | undefined): string {
   if (!iso) return '—';
@@ -18,11 +26,6 @@ function formatTime(iso: string | null | undefined): string {
     minute: '2-digit',
     timeZoneName: 'short',
   });
-}
-
-function formatBrier(b: number | null): string {
-  if (b === null || b === undefined) return '—';
-  return b.toFixed(4);
 }
 
 function StatusPill({
@@ -44,9 +47,9 @@ function StatusPill({
 }
 
 export default async function AgentPage() {
-  const [status, skills, proposals] = await Promise.all([
+  const [status, skillCards, proposals] = await Promise.all([
     getSystemStatus(),
-    getSkillRegistry(),
+    buildSkillCards(),
     getRecentProposals(10),
   ]);
 
@@ -57,10 +60,8 @@ export default async function AgentPage() {
     <div className="container mx-auto px-4 py-6 max-w-5xl space-y-10">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Agent log</h1>
-        <p className="mt-2 text-sm text-neutral-600 max-w-prose">
-          Read-only operational view of the Envision agent. Skill library,
-          14-day evaluation scores, and pending Curator activity. Auto-refreshes
-          every 60 seconds.
+        <p className="mt-4 max-w-2xl text-slate-700 text-sm leading-relaxed">
+          {AGENT_EXPLAINER}
         </p>
       </div>
 
@@ -70,7 +71,7 @@ export default async function AgentPage() {
         </h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Stat
-            label="Curator mutation"
+            label="Curator mutation (Vercel env)"
             value={
               <span className="flex items-center gap-1.5">
                 <StatusPill state={curatorEnabled ? 'on' : 'off'} />
@@ -100,78 +101,17 @@ export default async function AgentPage() {
         <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">
           Skill library
         </h2>
-        {skills.length === 0 ? (
+        {skillCards.length === 0 ? (
           <p className="text-sm text-neutral-500 italic">
-            No skills have produced forecasts yet.
+            No skills have produced forecasts in the last 30 days.
           </p>
         ) : (
-          <div className="border border-neutral-200 rounded overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-neutral-50 text-xs text-neutral-500 uppercase tracking-wide">
-                <tr>
-                  <th className="text-left px-4 py-2 font-medium">Skill</th>
-                  <th className="text-right px-4 py-2 font-medium">Cadence</th>
-                  <th className="text-right px-4 py-2 font-medium">
-                    Active / Total
-                  </th>
-                  <th className="text-right px-4 py-2 font-medium">
-                    Brier (14d)
-                  </th>
-                  <th className="text-right px-4 py-2 font-medium">
-                    Hits / FP
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-neutral-200">
-                {skills.map((s) => {
-                  const meta = SKILL_METADATA[s.skill_id];
-                  return (
-                    <tr key={s.skill_id}>
-                      <td className="px-4 py-3 align-top">
-                        <div className="font-medium">
-                          {meta?.label ?? s.skill_id}{' '}
-                          <code className="text-xs text-neutral-400 font-normal">
-                            v{s.version}
-                          </code>
-                        </div>
-                        {meta?.description && (
-                          <div className="text-xs text-neutral-500 mt-0.5 leading-snug max-w-prose">
-                            {meta.description}
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-right text-neutral-600 tabular-nums">
-                        {meta?.cadence ?? '—'}
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums">
-                        <span className="font-medium">{s.n_active}</span>
-                        <span className="text-neutral-400"> / </span>
-                        <span className="text-neutral-600">{s.n_forecasts}</span>
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums">
-                        {formatBrier(s.mean_brier)}
-                        <div className="text-xs text-neutral-400">
-                          {s.n_evaluations
-                            ? `${s.n_evaluations} eval${s.n_evaluations === 1 ? '' : 's'}`
-                            : 'no evals yet'}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-right tabular-nums">
-                        <span className="text-green-700">{s.hits}</span>
-                        <span className="text-neutral-400"> / </span>
-                        <span className="text-red-700">{s.false_positives}</span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {skillCards.map((card) => (
+              <SkillCard key={card.id} {...card} />
+            ))}
           </div>
         )}
-        <p className="text-xs text-neutral-400 mt-2">
-          Lower Brier scores indicate better-calibrated forecasts. Probability is
-          capped at 0.85 server-side, so a perfect hit has Brier 0.0225.
-        </p>
       </section>
 
       <section>
@@ -185,8 +125,7 @@ export default async function AgentPage() {
         </h2>
         {pendingProposals.length === 0 ? (
           <p className="text-sm text-neutral-500 italic">
-            No proposals awaiting review. The Curator has not made any
-            mutations yet (or all proposals have been approved/rejected).
+            No proposals awaiting review.
           </p>
         ) : (
           <ul className="border border-neutral-200 rounded divide-y divide-neutral-200">
@@ -203,7 +142,7 @@ export default async function AgentPage() {
         </h2>
         {proposals.length === 0 ? (
           <p className="text-sm text-neutral-500 italic">
-            No Curator proposals on record. The Curator becomes active in Day 6.
+            No Curator proposals on record.
           </p>
         ) : (
           <ul className="border border-neutral-200 rounded divide-y divide-neutral-200">
@@ -213,7 +152,6 @@ export default async function AgentPage() {
           </ul>
         )}
       </section>
-      
     </div>
   );
 }
@@ -249,6 +187,7 @@ function ProposalRowView({
     curator_reasoning: string;
   };
 }) {
+  const meta = getSkillMetadata(p.skill_id);
   const statusColor =
     p.status === 'pending'
       ? 'bg-amber-100 text-amber-700'
@@ -264,8 +203,12 @@ function ProposalRowView({
           >
             {p.status}
           </span>
-          <code className="text-xs">{p.skill_id}</code>
-          <span className="text-xs text-neutral-400">v{p.current_version} → v{p.current_version + 1}</span>
+          <span className="font-medium">
+            {meta?.displayName ?? p.skill_id}
+          </span>
+          <span className="text-xs text-neutral-400 font-mono">
+            v{p.current_version} → v{p.current_version + 1}
+          </span>
         </div>
         <div className="text-xs text-neutral-500 tabular-nums">
           {new Date(p.proposed_at).toLocaleString(undefined, {

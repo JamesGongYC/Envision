@@ -17,16 +17,24 @@ Prerequisites:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import psycopg
+from psycopg import Connection
 from shapely.geometry import Point, mapping
 from shapely.ops import unary_union
+
+_AGENT_LIB = Path(__file__).resolve().parents[4] / "lib"
+if str(_AGENT_LIB) not in sys.path:
+    sys.path.insert(0, str(_AGENT_LIB))
+from trace_builder import TraceBuilder  # noqa: E402
 
 # --- config ---------------------------------------------------------------
 SKILL_ID = "typhoon_landfall_imminent"
@@ -55,6 +63,16 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     print(f"[{SKILL_ID}] DATABASE_URL not set", file=sys.stderr)
     sys.exit(2)
+
+
+def parse_now(argv: list[str] | None = None) -> datetime:
+    p = argparse.ArgumentParser(description="Detect imminent typhoon landfall")
+    p.add_argument("--now", default=None, help="ISO8601 UTC cutoff (default: now)")
+    args = p.parse_args(argv)
+    if args.now is None:
+        return datetime.now(timezone.utc)
+    dt = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 # --- payload helpers (mirror typhoon_intensifying for consistency) ------
@@ -195,7 +213,7 @@ def build_cone(lon0, lat0, bearing_deg, speed_kmh):
 
 
 # --- data access ---------------------------------------------------------
-def load_active_storms(conn):
+def load_active_storms(conn: Connection, now: datetime):
     """Latest NHC advisory per storm, within the last
     LATEST_BULLETIN_WINDOW_HOURS hours."""
     with conn.cursor() as cur:
@@ -217,14 +235,37 @@ def load_active_storms(conn):
               FROM signals
               WHERE source = 'nhc'
                 AND signal_type = 'cyclone_advisory'
-                AND timestamp > now() - interval '{LATEST_BULLETIN_WINDOW_HOURS} hours'
+                AND timestamp > %s - interval '{LATEST_BULLETIN_WINDOW_HOURS} hours'
+                AND timestamp <= %s
             )
             SELECT id, timestamp, payload
             FROM ranked
             WHERE rn = 1
-            """
+            """,
+            (now, now),
         )
         return cur.fetchall()
+
+
+def count_populated_places_catalog(conn: Connection) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*)::int FROM populated_places WHERE population >= %s",
+            (MIN_POPULATION,),
+        )
+        return cur.fetchone()[0]
+
+
+def haversine_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+    return 2 * EARTH_R_KM * math.asin(min(1.0, math.sqrt(a)))
 
 
 def cities_in_cone(conn, cone_geojson):
@@ -247,14 +288,26 @@ def cities_in_cone(conn, cone_geojson):
 
 
 # --- scoring & reasoning -------------------------------------------------
+def probability_components(cities: list, total_pop: int) -> dict:
+    base = 0.45
+    n_bonus = min(0.20, 0.02 * len(cities))
+    pop_bonus = min(0.20, 0.05 * math.log10(max(1, total_pop / 100_000)))
+    return {
+        "base": base,
+        "population_at_risk": round(n_bonus + max(0.0, pop_bonus), 4),
+        "time_to_landfall_h": float(HORIZON_HOURS),
+    }
+
+
 def score_probability(cities):
     if not cities:
         return None
-    base = 0.45
-    n_bonus = min(0.20, 0.02 * len(cities))
-    pop_total = sum(c[3] for c in cities)
-    pop_bonus = min(0.20, 0.05 * math.log10(max(1, pop_total / 100_000)))
-    return round(min(0.85, base + n_bonus + max(0.0, pop_bonus)), 3)
+    total_pop = sum(c[3] for c in cities)
+    parts = probability_components(cities, total_pop)
+    return round(
+        min(0.85, parts["base"] + parts["population_at_risk"]),
+        3,
+    )
 
 
 def build_reasoning(name, classification, n_cities, top_cities,
@@ -272,7 +325,7 @@ def build_reasoning(name, classification, n_cities, top_cities,
 
 
 # --- write ---------------------------------------------------------------
-def insert_forecast(conn, forecast):
+def insert_forecast(conn: Connection, forecast):
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -280,7 +333,7 @@ def insert_forecast(conn, forecast):
               id, issued_at, valid_from, valid_until,
               disaster_class, geometry, probability,
               skill_id, skill_version, contributing_signal_ids,
-              reasoning, is_baseline
+              reasoning, is_baseline, trace
             ) VALUES (
               %(id)s, %(issued_at)s, %(valid_from)s, %(valid_until)s,
               %(disaster_class)s,
@@ -288,77 +341,120 @@ def insert_forecast(conn, forecast):
               %(probability)s,
               %(skill_id)s, %(skill_version)s,
               %(contributing_signal_ids)s::uuid[],
-              %(reasoning)s, %(is_baseline)s
+              %(reasoning)s, %(is_baseline)s,
+              %(trace)s::jsonb
             )
             """,
             forecast,
         )
 
 
-# --- main ----------------------------------------------------------------
-def main() -> int:
-    now = datetime.now(timezone.utc)
+# --- run -----------------------------------------------------------------
+def run(now: datetime, db: Connection) -> int:
     valid_until = now + timedelta(hours=FORECAST_VALID_HOURS)
 
-    with psycopg.connect(DATABASE_URL, autocommit=False) as conn:
-        storms = load_active_storms(conn)
-        if not storms:
-            print(f"[{SKILL_ID}] no active NHC advisories in last "
-                  f"{LATEST_BULLETIN_WINDOW_HOURS}h.")
-            return 0
+    storms = load_active_storms(db, now)
+    if not storms:
+        print(f"[{SKILL_ID}] no active NHC advisories in last "
+              f"{LATEST_BULLETIN_WINDOW_HOURS}h.")
+        return 0
 
-        print(f"[{SKILL_ID}] {len(storms)} active storm(s).")
+    print(f"[{SKILL_ID}] {len(storms)} active storm(s).")
+    places_queried = count_populated_places_catalog(db)
 
-        written = 0
-        for sig_id, _ts, payload in storms:
-            name = storm_display_name(payload)
-            cls = storm_classification(payload)
-            pos = storm_position(payload)
-            bearing = storm_heading_deg(payload)
-            speed = storm_speed_kmh(payload)
+    written = 0
+    for sig_id, _ts, payload in storms:
+        name = storm_display_name(payload)
+        cls = storm_classification(payload)
+        pos = storm_position(payload)
+        bearing = storm_heading_deg(payload)
+        speed = storm_speed_kmh(payload)
 
-            if pos is None or bearing is None or speed is None:
-                print(f"[{SKILL_ID}]   {name}: missing position/heading/speed "
-                      f"(pos={pos}, bearing={bearing}, speed={speed}); skip.")
-                continue
+        if pos is None or bearing is None or speed is None:
+            print(f"[{SKILL_ID}]   {name}: missing position/heading/speed "
+                  f"(pos={pos}, bearing={bearing}, speed={speed}); skip.")
+            continue
 
-            lon0, lat0 = pos
-            cone = build_cone(lon0, lat0, bearing, speed)
-            cone_geojson = mapping(cone)
+        lon0, lat0 = pos
+        cone = build_cone(lon0, lat0, bearing, speed)
+        cone_geojson = mapping(cone)
 
-            cities = cities_in_cone(conn, cone_geojson)
-            if not cities:
-                print(f"[{SKILL_ID}]   {name}: cone covers no populated "
-                      f"places with pop >= {MIN_POPULATION}.")
-                continue
+        cities = cities_in_cone(db, cone_geojson)
+        if not cities:
+            print(f"[{SKILL_ID}]   {name}: cone covers no populated "
+                  f"places with pop >= {MIN_POPULATION}.")
+            continue
 
-            total_pop = sum(c[3] for c in cities)
-            prob = score_probability(cities)
-            reasoning = build_reasoning(
-                name, cls, len(cities), cities, total_pop, speed, bearing
-            )
+        total_pop = sum(c[3] for c in cities)
+        prob = score_probability(cities)
+        reasoning = build_reasoning(
+            name, cls, len(cities), cities, total_pop, speed, bearing
+        )
 
-            forecast = {
-                "id": str(uuid.uuid4()),
-                "issued_at": now,
-                "valid_from": now,
-                "valid_until": valid_until,
-                "disaster_class": "typhoon",
-                "geometry": json.dumps(cone_geojson),
-                "probability": prob,
-                "skill_id": SKILL_ID,
-                "skill_version": SKILL_VERSION,
-                "contributing_signal_ids": [str(sig_id)],
-                "reasoning": reasoning,
-                "is_baseline": False,
-            }
-            insert_forecast(conn, forecast)
-            written += 1
-            print(f"[{SKILL_ID}]   {name}: cone covers {len(cities)} cities, "
-                  f"~{total_pop:,} pop, p={prob}")
+        minx, miny, maxx, maxy = cone.bounds
+        area_km2 = cone.area * (KM_PER_DEG_LAT ** 2)
+        places_in_cone = []
+        for geonameid, _name, _cc, pop, plon, plat in cities[:5]:
+            places_in_cone.append({
+                "place_id": int(geonameid),
+                "population": int(pop),
+                "distance_km": round(
+                    haversine_km(lon0, lat0, float(plon), float(plat)), 1
+                ),
+            })
 
-        conn.commit()
-        print(f"[{SKILL_ID}] wrote {written} forecasts.")
+        tb = TraceBuilder(now, SKILL_ID)
+        tb.set_inputs(
+            active_storms=len(storms),
+            populated_places_queried_count=places_queried,
+        )
+        tb.set_intermediate(
+            cone_polygon_summary={
+                "bbox": [float(minx), float(miny), float(maxx), float(maxy)],
+                "area_km2": round(area_km2, 1),
+            },
+            intersected_population_total=int(total_pop),
+            populated_places_in_cone=places_in_cone,
+        )
+        tb.add_geometry_step(
+            "cone_construction",
+            heading_deg=round(float(bearing), 1),
+            speed_kmh=round(float(speed), 1),
+            buffer_km_at_horizons=[[int(h), int(r)] for h, r in CONE_STEPS],
+        )
+        tb.set_probability_components(
+            **probability_components(cities, total_pop)
+        )
+
+        forecast = {
+            "id": str(uuid.uuid4()),
+            "issued_at": now,
+            "valid_from": now,
+            "valid_until": valid_until,
+            "disaster_class": "typhoon",
+            "geometry": json.dumps(cone_geojson),
+            "probability": prob,
+            "skill_id": SKILL_ID,
+            "skill_version": SKILL_VERSION,
+            "contributing_signal_ids": [str(sig_id)],
+            "reasoning": reasoning,
+            "is_baseline": False,
+            "trace": json.dumps(tb.build()),
+        }
+        insert_forecast(db, forecast)
+        written += 1
+        print(f"[{SKILL_ID}]   {name}: cone covers {len(cities)} cities, "
+              f"~{total_pop:,} pop, p={prob}")
+
+    db.commit()
+    print(f"[{SKILL_ID}] wrote {written} forecasts.")
+    return written
+
+
+def main() -> int:
+    now = parse_now()
+    with psycopg.connect(DATABASE_URL, autocommit=False) as db:
+        run(now, db)
     return 0
 
 

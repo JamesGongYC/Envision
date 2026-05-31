@@ -18,14 +18,22 @@ Notes:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import psycopg
+from psycopg import Connection
 from shapely.geometry import Point, mapping
+
+_AGENT_LIB = Path(__file__).resolve().parents[4] / "lib"
+if str(_AGENT_LIB) not in sys.path:
+    sys.path.insert(0, str(_AGENT_LIB))
+from trace_builder import TraceBuilder  # noqa: E402
 
 # --- config ---------------------------------------------------------------
 SKILL_ID = "typhoon_intensifying"
@@ -42,6 +50,16 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if not DATABASE_URL:
     print(f"[{SKILL_ID}] DATABASE_URL not set", file=sys.stderr)
     sys.exit(2)
+
+
+def parse_now(argv: list[str] | None = None) -> datetime:
+    p = argparse.ArgumentParser(description="Detect typhoon intensification")
+    p.add_argument("--now", default=None, help="ISO8601 UTC cutoff (default: now)")
+    args = p.parse_args(argv)
+    if args.now is None:
+        return datetime.now(timezone.utc)
+    dt = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 # --- payload helpers (defensive) -----------------------------------------
@@ -116,7 +134,7 @@ def storm_classification(payload: dict) -> str:
 
 
 # --- data access ---------------------------------------------------------
-def load_recent_advisories(conn) -> list[tuple]:
+def load_recent_advisories(conn: Connection, now: datetime) -> list[tuple]:
     """[(signal_id, timestamp, payload), ...] for NHC advisories in last 24h."""
     with conn.cursor() as cur:
         cur.execute(
@@ -125,9 +143,11 @@ def load_recent_advisories(conn) -> list[tuple]:
             FROM signals
             WHERE source = 'nhc'
               AND signal_type = 'cyclone_advisory'
-              AND timestamp > now() - interval '{LOOKBACK_HOURS} hours'
+              AND timestamp > %s - interval '{LOOKBACK_HOURS} hours'
+              AND timestamp <= %s
             ORDER BY timestamp ASC
-            """
+            """,
+            (now, now),
         )
         return cur.fetchall()
 
@@ -180,9 +200,24 @@ def find_intensification(bulletins: list[tuple], now: datetime):
 
 
 # --- scoring & reasoning -------------------------------------------------
-def score_probability(delta_hpa: float) -> float:
+def probability_components(delta_hpa: float, elapsed_h: float) -> dict:
+    base = 0.50
+    pressure_drop_magnitude = 0.04 * max(0.0, delta_hpa - 5.0)
+    recency_factor = max(0.0, 1.0 - abs(elapsed_h - WINDOW_HOURS) / WINDOW_TOLERANCE_HOURS)
+    return {
+        "base": base,
+        "pressure_drop_magnitude": round(pressure_drop_magnitude, 4),
+        "recency_factor": round(recency_factor, 4),
+    }
+
+
+def score_probability(delta_hpa: float, elapsed_h: float) -> float:
     """5 hPa → 0.50; +0.04 per additional hPa; DB caps at 0.85."""
-    return round(min(0.85, 0.50 + 0.04 * max(0.0, delta_hpa - 5.0)), 3)
+    parts = probability_components(delta_hpa, elapsed_h)
+    return round(
+        min(0.85, parts["base"] + parts["pressure_drop_magnitude"]),
+        3,
+    )
 
 
 def build_reasoning(name: str, classification: str,
@@ -197,7 +232,7 @@ def build_reasoning(name: str, classification: str,
 
 
 # --- write ---------------------------------------------------------------
-def insert_forecast(conn, forecast: dict) -> None:
+def insert_forecast(conn: Connection, forecast: dict) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -205,7 +240,7 @@ def insert_forecast(conn, forecast: dict) -> None:
               id, issued_at, valid_from, valid_until,
               disaster_class, geometry, probability,
               skill_id, skill_version, contributing_signal_ids,
-              reasoning, is_baseline
+              reasoning, is_baseline, trace
             ) VALUES (
               %(id)s, %(issued_at)s, %(valid_from)s, %(valid_until)s,
               %(disaster_class)s,
@@ -213,79 +248,121 @@ def insert_forecast(conn, forecast: dict) -> None:
               %(probability)s,
               %(skill_id)s, %(skill_version)s,
               %(contributing_signal_ids)s::uuid[],
-              %(reasoning)s, %(is_baseline)s
+              %(reasoning)s, %(is_baseline)s,
+              %(trace)s::jsonb
             )
             """,
             forecast,
         )
 
 
-# --- main ----------------------------------------------------------------
-def main() -> int:
-    now = datetime.now(timezone.utc)
+# --- run -----------------------------------------------------------------
+def run(now: datetime, db: Connection) -> int:
     valid_until = now + timedelta(hours=FORECAST_VALID_HOURS)
 
-    with psycopg.connect(DATABASE_URL, autocommit=False) as conn:
-        rows = load_recent_advisories(conn)
-        if not rows:
-            print(f"[{SKILL_ID}] no NHC advisories in last "
-                  f"{LOOKBACK_HOURS}h (likely off-season).")
-            return 0
+    rows = load_recent_advisories(db, now)
+    if not rows:
+        print(f"[{SKILL_ID}] no NHC advisories in last "
+              f"{LOOKBACK_HOURS}h (likely off-season).")
+        return 0
 
-        storms = group_by_storm(rows)
-        if not storms:
-            print(f"[{SKILL_ID}] advisories present but no usable "
-                  f"pressure/id fields — check payload structure.")
-            return 0
+    storms = group_by_storm(rows)
+    if not storms:
+        print(f"[{SKILL_ID}] advisories present but no usable "
+              f"pressure/id fields — check payload structure.")
+        return 0
 
-        print(f"[{SKILL_ID}] tracking {len(storms)} storm(s) "
-              f"across {len(rows)} advisor{'y' if len(rows)==1 else 'ies'}.")
+    print(f"[{SKILL_ID}] tracking {len(storms)} storm(s) "
+          f"across {len(rows)} advisor{'y' if len(rows)==1 else 'ies'}.")
 
-        written = 0
-        for skey, bulletins in storms.items():
-            result = find_intensification(bulletins, now)
-            if result is None:
-                continue
+    active_storms = []
+    pressure_history = []
+    for skey, bulletins in storms.items():
+        pl = bulletins[-1][3]
+        active_storms.append({
+            "storm_id": skey,
+            "name": storm_display_name(pl),
+            "source": "nhc",
+        })
+        pressure_history.append({
+            "storm_id": skey,
+            "pressures_hpa": [b[2] for b in bulletins],
+            "timestamps": [b[1].isoformat() for b in bulletins],
+        })
 
-            earlier, latest, delta, elapsed_h = result
-            sig_id_then, _t_then, p_then, _pl_then = earlier
-            sig_id_now, _t_now, p_now, pl_now = latest
+    written = 0
+    for skey, bulletins in storms.items():
+        result = find_intensification(bulletins, now)
+        if result is None:
+            continue
 
-            pos = storm_position(pl_now)
-            if pos is None:
-                print(f"[{SKILL_ID}]   {skey}: intensifying but no usable "
-                      f"position; skipping.")
-                continue
+        earlier, latest, delta, elapsed_h = result
+        sig_id_then, _t_then, p_then, _pl_then = earlier
+        sig_id_now, _t_now, p_now, pl_now = latest
 
-            geom = Point(pos).buffer(BUFFER_DEG)
-            geom_geojson = mapping(geom)
+        pos = storm_position(pl_now)
+        if pos is None:
+            print(f"[{SKILL_ID}]   {skey}: intensifying but no usable "
+                  f"position; skipping.")
+            continue
 
-            name = storm_display_name(pl_now)
-            cls = storm_classification(pl_now)
-            prob = score_probability(delta)
-            reasoning = build_reasoning(name, cls, p_then, p_now, delta, elapsed_h)
+        geom = Point(pos).buffer(BUFFER_DEG)
+        geom_geojson = mapping(geom)
 
-            forecast = {
-                "id": str(uuid.uuid4()),
-                "issued_at": now,
-                "valid_from": now,
-                "valid_until": valid_until,
-                "disaster_class": "typhoon",
-                "geometry": json.dumps(geom_geojson),
-                "probability": prob,
-                "skill_id": SKILL_ID,
-                "skill_version": SKILL_VERSION,
-                "contributing_signal_ids": [str(sig_id_then), str(sig_id_now)],
-                "reasoning": reasoning,
-                "is_baseline": False,
-            }
-            insert_forecast(conn, forecast)
-            written += 1
-            print(f"[{SKILL_ID}]   {name}: {p_then:.0f}→{p_now:.0f} hPa "
-                  f"over {elapsed_h:.1f}h (Δ={delta:.1f}) p={prob}")
+        name = storm_display_name(pl_now)
+        cls = storm_classification(pl_now)
+        prob = score_probability(delta, elapsed_h)
+        reasoning = build_reasoning(name, cls, p_then, p_now, delta, elapsed_h)
 
-        conn.commit()
-        print(f"[{SKILL_ID}] wrote {written} forecasts.")
+        tb = TraceBuilder(now, SKILL_ID)
+        tb.set_inputs(active_storms=active_storms)
+        tb.set_intermediate(
+            pressure_history=pressure_history,
+            pressure_drops=[{
+                "storm_id": skey,
+                "drop_hpa": round(delta, 2),
+                "period_h": round(elapsed_h, 2),
+            }],
+        )
+        tb.add_geometry_step(
+            "storm_positions",
+            storm_positions=[{
+                "storm_id": skey,
+                "lat": float(pos[1]),
+                "lon": float(pos[0]),
+            }],
+        )
+        tb.set_probability_components(**probability_components(delta, elapsed_h))
+
+        forecast = {
+            "id": str(uuid.uuid4()),
+            "issued_at": now,
+            "valid_from": now,
+            "valid_until": valid_until,
+            "disaster_class": "typhoon",
+            "geometry": json.dumps(geom_geojson),
+            "probability": prob,
+            "skill_id": SKILL_ID,
+            "skill_version": SKILL_VERSION,
+            "contributing_signal_ids": [str(sig_id_then), str(sig_id_now)],
+            "reasoning": reasoning,
+            "is_baseline": False,
+            "trace": json.dumps(tb.build()),
+        }
+        insert_forecast(db, forecast)
+        written += 1
+        print(f"[{SKILL_ID}]   {name}: {p_then:.0f}→{p_now:.0f} hPa "
+              f"over {elapsed_h:.1f}h (Δ={delta:.1f}) p={prob}")
+
+    db.commit()
+    print(f"[{SKILL_ID}] wrote {written} forecasts.")
+    return written
+
+
+def main() -> int:
+    now = parse_now()
+    with psycopg.connect(DATABASE_URL, autocommit=False) as db:
+        run(now, db)
     return 0
 
 

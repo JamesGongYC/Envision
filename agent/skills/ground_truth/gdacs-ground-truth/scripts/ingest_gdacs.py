@@ -14,6 +14,7 @@ Optional env:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -23,6 +24,7 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 import psycopg
+from psycopg import Connection
 
 FEED_URL = os.environ.get("GDACS_FEED_URL", "https://www.gdacs.org/xml/rss.xml")
 TYPES = {
@@ -40,13 +42,25 @@ NS = {
     "georss": "http://www.georss.org/georss",
 }
 
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+def parse_now(argv: list[str] | None = None) -> datetime:
+    p = argparse.ArgumentParser(description="Ingest GDACS ground truth events")
+    p.add_argument("--now", default=None, help="ISO8601 UTC run time (default: now)")
+    args = p.parse_args(argv)
+    if args.now is None:
+        return datetime.now(timezone.utc)
+    dt = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
 
 def text(item, path: str) -> str | None:
     el = item.find(path, NS)
     return el.text.strip() if el is not None and el.text else None
 
 
-def parse_when(*candidates: str | None) -> datetime:
+def parse_when(*candidates: str | None, now: datetime) -> datetime:
     for val in candidates:
         if not val:
             continue
@@ -58,7 +72,7 @@ def parse_when(*candidates: str | None) -> datetime:
             return datetime.fromisoformat(val.replace("Z", "+00:00")).astimezone(timezone.utc)
         except ValueError:
             pass
-    return datetime.now(timezone.utc)
+    return now
 
 
 def point(item) -> tuple[float, float] | None:
@@ -84,7 +98,7 @@ def fetch_items() -> list:
     return list(ET.fromstring(r.content).iter("item"))
 
 
-def to_params(item) -> dict | None:
+def to_params(item, now: datetime) -> dict | None:
     etype = (text(item, "gdacs:eventtype") or "").upper()
     if etype not in TYPES:
         return None
@@ -106,7 +120,7 @@ def to_params(item) -> dict | None:
     }
     geometry = {"type": "Point", "coordinates": [lon, lat]}
     return {
-        "occurred_at": parse_when(payload["fromdate"], text(item, "pubDate")),
+        "occurred_at": parse_when(payload["fromdate"], text(item, "pubDate"), now=now),
         "source": "gdacs",
         "disaster_class": CLASS_MAP.get(etype, etype.lower()),
         "geometry": json.dumps(geometry),
@@ -115,10 +129,7 @@ def to_params(item) -> dict | None:
     }
 
 
-def insert_many(rows: list[dict]) -> int:
-    dsn = os.environ.get("DATABASE_URL")
-    if not dsn:
-        sys.exit("DATABASE_URL is not set. Add it to ~/.hermes/.env")
+def insert_many(db: Connection, rows: list[dict]) -> int:
     sql = """
         INSERT INTO ground_truth (occurred_at, source, disaster_class, geometry, severity, payload)
         VALUES (
@@ -127,21 +138,30 @@ def insert_many(rows: list[dict]) -> int:
             %(severity)s, %(payload)s::jsonb
         );
     """
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(sql, rows)
-        conn.commit()
+    with db.cursor() as cur:
+        cur.executemany(sql, rows)
+    db.commit()
     return len(rows)
 
 
-def main() -> None:
+def run(now: datetime, db: Connection) -> int:
     items = fetch_items()
-    rows = [p for it in items if (p := to_params(it)) is not None]
+    rows = [p for it in items if (p := to_params(it, now)) is not None]
     if not rows:
         print(f"No GDACS events matched types {sorted(TYPES)} (feed had {len(items)} items).")
-        return
-    n = insert_many(rows)
+        return 0
+    n = insert_many(db, rows)
     print(f"Inserted {n} GDACS ground-truth events (from {len(items)} feed items).")
+    return n
+
+
+def main() -> int:
+    if not DATABASE_URL:
+        sys.exit("DATABASE_URL is not set. Add it to ~/.hermes/.env")
+    now = parse_now()
+    with psycopg.connect(DATABASE_URL) as db:
+        run(now, db)
+    return 0
 
 
 if __name__ == "__main__":

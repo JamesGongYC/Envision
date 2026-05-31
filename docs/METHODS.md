@@ -32,16 +32,56 @@ NHC         ─┘                                   ▼
 
 ## 2. Ingestion
 
-Four ingestion skills run on Hermes cron, polling each source on its appropriate cadence:
+Hermes cron skills (synced via `tools/sync_skills.py`) plus Modal-native ingestion:
 
 | Skill | Source | Cadence | Writes |
 |---|---|---|---|
-| `firms-active-fires` | NASA FIRMS VIIRS + MODIS | 30 min | `signals` (hotspot) |
+| `firms-active-fires` | NASA FIRMS VIIRS + MODIS (global) | 30 min | `signals` (hotspot) |
 | `nws-fire-alerts` | NWS Alerts API | 30 min | `signals` (fire_warning) |
 | `nhc-cyclones` | NHC CurrentStorms.json | 3 h | `signals` (cyclone_advisory) |
-| `gdacs-poller` | GDACS GeoRSS | 6 h | `ground_truth` |
+| `open-meteo-fire-weather` | Open-Meteo forecast API | 3 h | `signals` (fire_weather) |
+| `jtwc-cyclones` | JTWC ATCF bulletins | 6 h | `signals` (cyclone_advisory) |
+| `ecmwf-fire-weather-derived` | ECMWF Open Data HRES GRIB | 12 h (Modal) | `signals` (fire_weather_grid) |
+| `aifs-cyclone-feature` | ECMWF Open Data AIFS GRIB | 12 h (Modal) | `signals` (cyclone_feature) |
+| `aifs-fire-weather-grid` | ECMWF Open Data AIFS GRIB | 12 h (Modal) | `signals` (fire_weather_grid) |
+| `aifs-high-wind-corridor` | ECMWF Open Data AIFS GRIB | 12 h (Modal) | `signals` (high_wind_corridor) |
+| `aifs-heavy-precipitation-band` | ECMWF Open Data AIFS GRIB | 12 h (Modal) | `signals` (heavy_precipitation_band) |
+| `aifs-heat-dome` | ECMWF Open Data AIFS GRIB | 12 h (Modal) | `signals` (heat_dome) |
+| `gdacs-ground-truth` | GDACS GeoRSS | 6 h | `ground_truth` |
 
 Every signal is dedup'd via a payload hash trigger (migration 002) and stored in 2D WGS84.
+
+### ECMWF derived fire weather (v2 Day 4)
+
+Modal skill `ecmwf-fire-weather-derived` downloads HRES Open Data at **+24h** for four variables: 2m temperature (`2t`), 2m dewpoint (`2d`), 10m wind components (`10u`/`10v`), and 24h precipitation (`tp`). Per 0.25° grid cell:
+
+```
+score = (T > 30°C) + (dewpoint_depression > 15°C) + (wind > 6.9 m/s) + (precip < 1 mm)
+```
+
+Cells with `score >= 3` (configurable via `ECMWF_FW_THRESHOLD`) are grouped into contiguous polygons via connected-component labeling and `shapely.unary_union`. Each polygon becomes one `signals` row: `source='ecmwf_open_data'`, `signal_type='fire_weather_grid'`. The signal `timestamp` is the **forecast valid time** (run + 24h), not the model run time.
+
+Detectors do not consume ECMWF polygons until v2.5 (`wildfire-risk-elevated` generalization deferred).
+
+### AIFS signals (v2 Day 5)
+
+Five independent Modal skills read ECMWF **AIFS** Open Data (`model=aifs-single`) and write upstream **`signals`** with `source='aifs'`. This is substrate data for downstream detection (post-v2) and future agentic consumption — not forecast-table output. AIFS skills are excluded from the v3 mutation surface (`aifs-*` skill IDs).
+
+Shared code: [`agent/modal_skills/_shared/`](../agent/modal_skills/_shared/) (`aifs_common.py`, `grid.py`).
+
+| Modal skill | signal_type | Extraction |
+|---|---|---|
+| `aifs-cyclone-feature` | `cyclone_feature` | MSLP local minima (<1005 hPa) + 850 hPa relative vorticity (from u/v); track across +0/+24/+48/+72h within 300 km; ≥2h persistence; Point geometry |
+| `aifs-fire-weather-grid` | `fire_weather_grid` | Same 0–4 fire weather score as ECMWF HRES at +24h; polygon aggregates (dual provenance with `ecmwf_open_data`) |
+| `aifs-high-wind-corridor` | `high_wind_corridor` | 10m wind > 16.7 m/s at +24h; polygon aggregates |
+| `aifs-heavy-precipitation-band` | `heavy_precipitation_band` | 24h `tp` > 50 mm at +24h; polygon aggregates |
+| `aifs-heat-dome` | `heat_dome` | `2t` > 35°C at ≥3 of 4 steps (+0/+24/+48/+72h); polygon aggregates |
+
+**Disable one signal type:** stop that Modal app (`modal app stop <app-name>`) without affecting the others.
+
+**Cadence:** staggered within 05:00–05:25 and 17:00–17:25 UTC (5–25 min offsets to reduce concurrent ECMWF downloads).
+
+Note: AIFS Open Data does not expose `vo` at 850 hPa directly; cyclone vorticity is computed from `u`/`v` at 850 hPa.
 
 ## 3. Detection
 
@@ -68,13 +108,34 @@ Each evaluation writes one row with `outcome ∈ {'hit', 'false_positive'}` and 
 
 The evaluator waits 12h past `valid_until` before scoring, so GDACS has time to publish.
 
+**Operator-facing definitions** (also shown as hover tooltips on `/agent` skill cards):
+
+- **Brier score:** calibration metric for probabilistic forecasts. Lower is better. A perfect skill scores 0; random guessing scores around 0.25.
+- **Hit:** forecast issued and a matching ground-truth event occurred within the validity window.
+- **False positive:** forecast issued but no matching ground-truth event occurred within the validity window.
+
+## 4b. Traces (v2 Day 6)
+
+Detection skills write structured **`forecasts.trace`** JSONB on every new forecast. The Modal Curator writes **`skill_edit_proposals.curator_trace`** on every new proposal. These are the v3 mutator's primary reading material for understanding *why* a skill made a given choice.
+
+- **Schema:** [`docs/TRACES.md`](TRACES.md) (authoritative per-skill shapes)
+- **Builder:** [`agent/lib/trace_builder.py`](../agent/lib/trace_builder.py) — `TraceBuilder` (detection), `CuratorTraceBuilder` (curator)
+- **Soft cap:** 12 KB serialized JSON; sets `_truncated: true` when trimming
+- **Hard cap:** 16 KB (`trace_size_cap` CHECK on `forecasts.trace`)
+- **Validation:** `python tools/validate_traces.py` (read-only Neon spot-check)
+- **Backfill:** none — older rows keep empty `{}`
+
+Hermes detection skills receive `trace_builder.py` via `tools/sync_skills.py --apply` (copied into each skill's `scripts/`). Modal curator mounts `agent/lib/` on the container image.
+
 ## 5. Curation
 
 Once daily, the Curator skill reads 14-day Brier statistics per detection skill and proposes parameter adjustments via Claude (`claude-sonnet-4-6`).
 
+**Runtime (v2 Day 4):** Curator runs on **Modal** (`agent/modal_skills/curator/`), scheduled 04:00 UTC. Detection skill scripts are staged into `~/.hermes/skills/` inside the container before each run. Hermes-side curator retired.
+
 **Scope is enforced by prompt, not by sandbox.** The Curator is told it may only change numeric constants and templated reasoning strings — not function signatures, control flow, imports, SQL, or schema. The output is validated for Python syntax but not for semantic safety. Human review at promotion time is the real safety bar.
 
-Every proposal lands in `skill_edit_proposals` with `status='pending'`. The Curator never writes to skill files on disk.
+Every proposal lands in `skill_edit_proposals` with `status='pending'` and a populated `curator_trace` (Brier stats observed, AST validation, prompt hash, LLM response text). The Curator never writes to skill files on disk.
 
 ## 6. Approval workflow
 
@@ -103,7 +164,16 @@ The `approve` command does not overwrite files. This is intentional. The CLI mar
 
 ## 8. Kill switch
 
-`ENVISION_CURATOR_ENABLED=false` (in `~/.hermes/.env` or the environment) causes the Curator to exit immediately at the top of its cycle. It does not stop:
+**Modal curator:** Set `ENVISION_CURATOR_ENABLED=false` in the Modal secret `envision-neon`. Re-create the secret with all keys (`DATABASE_URL`, `ANTHROPIC_API_KEY`, `ENVISION_CURATOR_ENABLED`):
+
+```sh
+python -m modal secret create envision-neon \
+  DATABASE_URL='...' ANTHROPIC_API_KEY='...' ENVISION_CURATOR_ENABLED=false
+```
+
+**Legacy / local:** `ENVISION_CURATOR_ENABLED=false` in `~/.hermes/.env` still applies to any Hermes-process curator copy (retired Day 4).
+
+When disabled, the Curator exits immediately at the top of its cycle. It does not stop:
 - Detection skills from running
 - The evaluator from running
 - The viewer from displaying data
@@ -130,8 +200,10 @@ To halt detection itself, remove the corresponding cron jobs with `hermes cron r
 | Ingestion cadence (GDACS) | 6 h | cron |
 | Detection cadence (wildfire) | 30 min | cron |
 | Detection cadence (typhoon) | 3 h | cron |
-| Evaluator cadence | 24 h | cron |
-| Curator cadence | 24 h | cron |
+| Evaluator cadence | 24 h | Hermes cron |
+| Curator cadence | 24 h | Modal cron (04:00 UTC) |
+| ECMWF derived cadence | 12 h | Modal cron (04:00 + 16:00 UTC) |
+| AIFS skills cadence | 12 h | Modal crons (05:00–05:25 + 17:00–17:25 UTC) |
 | Probability cap | 0.85 | DB constraint |
 | Evaluation grace period | 12 h after valid_until | evaluator |
 | Brier window | 14 days | curator |

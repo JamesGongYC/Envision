@@ -12,17 +12,24 @@ Probability is capped server-side at 0.85 by a CHECK constraint.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import psycopg
-from psycopg.types.json import Jsonb
+from psycopg import Connection
 from sklearn.cluster import DBSCAN
 from shapely.geometry import MultiPoint, Point, mapping
+
+_AGENT_LIB = Path(__file__).resolve().parents[4] / "lib"
+if str(_AGENT_LIB) not in sys.path:
+    sys.path.insert(0, str(_AGENT_LIB))
+from trace_builder import TraceBuilder  # noqa: E402
 
 # --- config ---------------------------------------------------------------
 SKILL_ID = "wildfire_risk_elevated"
@@ -41,8 +48,18 @@ if not DATABASE_URL:
     sys.exit(2)
 
 
+def parse_now(argv: list[str] | None = None) -> datetime:
+    p = argparse.ArgumentParser(description="Detect elevated wildfire risk")
+    p.add_argument("--now", default=None, help="ISO8601 UTC cutoff (default: now)")
+    args = p.parse_args(argv)
+    if args.now is None:
+        return datetime.now(timezone.utc)
+    dt = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 # --- data access ----------------------------------------------------------
-def load_recent_hotspots(conn) -> list[tuple]:
+def load_recent_hotspots(conn: Connection, now: datetime) -> list[tuple]:
     """Return [(id, lon, lat), ...] for FIRMS hotspots in last LOOKBACK_HOURS."""
     with conn.cursor() as cur:
         cur.execute(
@@ -53,13 +70,34 @@ def load_recent_hotspots(conn) -> list[tuple]:
             FROM signals
             WHERE signal_type = 'hotspot'
               AND source LIKE 'firms%%'
-              AND timestamp > now() - interval '{LOOKBACK_HOURS} hours'
-            """
+              AND timestamp > %s - interval '{LOOKBACK_HOURS} hours'
+              AND timestamp <= %s
+            """,
+            (now, now),
         )
         return cur.fetchall()
 
 
-def alerts_intersecting(conn, cluster_geom_geojson: dict) -> list[tuple]:
+def count_nws_polygons(conn: Connection, now: datetime) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)::int
+            FROM signals
+            WHERE source = 'nws_alerts'
+              AND signal_type = 'fire_warning'
+              AND ingested_at > %s - interval '24 hours'
+              AND timestamp <= %s
+              AND geometry IS NOT NULL
+            """,
+            (now, now),
+        )
+        return cur.fetchone()[0]
+
+
+def alerts_intersecting(
+    conn: Connection, cluster_geom_geojson: dict, now: datetime
+) -> list[tuple]:
     """Return [(id, payload)] for active fire-weather alerts intersecting geom."""
     with conn.cursor() as cur:
         cur.execute(
@@ -68,14 +106,15 @@ def alerts_intersecting(conn, cluster_geom_geojson: dict) -> list[tuple]:
             FROM signals
             WHERE source = 'nws_alerts'
               AND signal_type = 'fire_warning'
-              AND ingested_at > now() - interval '24 hours'
+              AND ingested_at > %s - interval '24 hours'
+              AND timestamp <= %s
               AND geometry IS NOT NULL
               AND ST_Intersects(
                 geometry,
                 ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
               )
             """,
-            (json.dumps(cluster_geom_geojson),),
+            (now, now, json.dumps(cluster_geom_geojson)),
         )
         return cur.fetchall()
 
@@ -108,12 +147,29 @@ def cluster_geometry(cluster_points: list[tuple]):
 
 
 # --- scoring & reasoning --------------------------------------------------
+def probability_components(n_hotspots: int, n_alerts_overlap: int) -> dict:
+    base = 0.40
+    cluster_size_factor = min(0.30, 0.02 * max(0, n_hotspots - MIN_SAMPLES))
+    polygon_overlap_factor = min(0.30, 0.15 * n_alerts_overlap)
+    return {
+        "base": base,
+        "cluster_size_factor": cluster_size_factor,
+        "polygon_overlap_factor": polygon_overlap_factor,
+    }
+
+
 def score_probability(n_hotspots: int, n_alerts_overlap: int) -> float:
     """Crude additive scoring; DB caps at 0.85 anyway."""
-    base = 0.40
-    hotspot_bonus = min(0.30, 0.02 * max(0, n_hotspots - MIN_SAMPLES))
-    overlap_bonus = min(0.30, 0.15 * n_alerts_overlap)
-    return round(min(0.85, base + hotspot_bonus + overlap_bonus), 3)
+    parts = probability_components(n_hotspots, n_alerts_overlap)
+    return round(
+        min(
+            0.85,
+            parts["base"]
+            + parts["cluster_size_factor"]
+            + parts["polygon_overlap_factor"],
+        ),
+        3,
+    )
 
 
 def build_reasoning(n_hotspots: int, alert_names: list[str], centroid_xy) -> str:
@@ -128,7 +184,7 @@ def build_reasoning(n_hotspots: int, alert_names: list[str], centroid_xy) -> str
 
 
 # --- write ----------------------------------------------------------------
-def insert_forecast(conn, forecast: dict) -> None:
+def insert_forecast(conn: Connection, forecast: dict) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -136,7 +192,7 @@ def insert_forecast(conn, forecast: dict) -> None:
               id, issued_at, valid_from, valid_until,
               disaster_class, geometry, probability,
               skill_id, skill_version, contributing_signal_ids,
-              reasoning, is_baseline
+              reasoning, is_baseline, trace
             ) VALUES (
               %(id)s, %(issued_at)s, %(valid_from)s, %(valid_until)s,
               %(disaster_class)s,
@@ -144,77 +200,122 @@ def insert_forecast(conn, forecast: dict) -> None:
               %(probability)s,
               %(skill_id)s, %(skill_version)s,
               %(contributing_signal_ids)s::uuid[],
-              %(reasoning)s, %(is_baseline)s
+              %(reasoning)s, %(is_baseline)s,
+              %(trace)s::jsonb
             )
             """,
             forecast,
         )
 
 
-# --- main -----------------------------------------------------------------
-def main() -> int:
-    now = datetime.now(timezone.utc)
+# --- run ------------------------------------------------------------------
+def run(now: datetime, db: Connection) -> int:
     valid_until = now + timedelta(hours=FORECAST_VALID_HOURS)
 
-    with psycopg.connect(DATABASE_URL, autocommit=False) as conn:
-        hotspots = load_recent_hotspots(conn)
-        if len(hotspots) < MIN_SAMPLES:
-            print(f"[{SKILL_ID}] only {len(hotspots)} hotspots in last "
-                  f"{LOOKBACK_HOURS}h; skipping.")
-            return 0
+    hotspots = load_recent_hotspots(db, now)
+    if len(hotspots) < MIN_SAMPLES:
+        print(f"[{SKILL_ID}] only {len(hotspots)} hotspots in last "
+              f"{LOOKBACK_HOURS}h; skipping.")
+        return 0
 
-        clusters = cluster_hotspots(hotspots)
-        print(f"[{SKILL_ID}] {len(hotspots)} hotspots → {len(clusters)} clusters.")
+    clusters = cluster_hotspots(hotspots)
+    print(f"[{SKILL_ID}] {len(hotspots)} hotspots → {len(clusters)} clusters.")
+    polygon_count_nws = count_nws_polygons(db, now)
 
-        written = 0
-        for label, points in clusters:
-            geom = cluster_geometry(points)
-            geom_geojson = mapping(geom)
+    written = 0
+    selected_clusters = []
+    cluster_bboxes: list[list[float]] = []
+    for label, points in clusters:
+        geom = cluster_geometry(points)
+        geom_geojson = mapping(geom)
 
-            matches = alerts_intersecting(conn, geom_geojson)
-            if not matches:
-                continue  # cluster not intersecting any active alert
+        matches = alerts_intersecting(db, geom_geojson, now)
+        if not matches:
+            continue
 
-            alert_names: list[str] = []
-            for _aid, payload in matches:
-                if isinstance(payload, dict):
-                    alert_names.append(
-                        payload.get("event")
-                        or payload.get("headline")
-                        or "fire alert"
-                    )
+        centroid = geom.centroid
+        minx, miny, maxx, maxy = geom.bounds
+        cluster_bboxes.append(
+            [float(minx), float(miny), float(maxx), float(maxy)]
+        )
+        selected_clusters.append({
+            "cluster_id": str(label),
+            "size": len(points),
+            "centroid_lat_lon": [float(centroid.y), float(centroid.x)],
+            "intersecting_polygon_id": str(matches[0][0]),
+        })
 
-            centroid = geom.centroid
-            prob = score_probability(len(points), len(matches))
-            reasoning = build_reasoning(
-                len(points), alert_names, (centroid.x, centroid.y)
-            )
+        alert_names: list[str] = []
+        for _aid, payload in matches:
+            if isinstance(payload, dict):
+                alert_names.append(
+                    payload.get("event")
+                    or payload.get("headline")
+                    or "fire alert"
+                )
 
-            contributing = [str(p[0]) for p in points] + [
-                str(aid) for aid, _ in matches
-            ]
+        prob = score_probability(len(points), len(matches))
+        reasoning = build_reasoning(
+            len(points), alert_names, (centroid.x, centroid.y)
+        )
 
-            forecast = {
-                "id": str(uuid.uuid4()),
-                "issued_at": now,
-                "valid_from": now,
-                "valid_until": valid_until,
-                "disaster_class": "wildfire",
-                "geometry": json.dumps(geom_geojson),
-                "probability": prob,
-                "skill_id": SKILL_ID,
-                "skill_version": SKILL_VERSION,
-                "contributing_signal_ids": contributing,
-                "reasoning": reasoning,
-                "is_baseline": False,
-            }
-            insert_forecast(conn, forecast)
-            written += 1
-            print(f"[{SKILL_ID}]   cluster#{label}: "
-                  f"n={len(points)} p={prob} alerts={len(matches)}")
+        contributing = [str(p[0]) for p in points] + [
+            str(aid) for aid, _ in matches
+        ]
 
-        conn.commit()
-        print(f"[{SKILL_ID}] wrote {written} forecasts.")
+        sc = selected_clusters[-1]
+        tb = TraceBuilder(now, SKILL_ID)
+        tb.set_inputs(
+            hotspot_count=len(hotspots),
+            polygon_count_nws=polygon_count_nws,
+            polygon_count_ecmwf=0,
+        )
+        tb.set_intermediate(
+            clusters_found=len(clusters),
+            selected_clusters=[sc],
+        )
+        tb.add_geometry_step(
+            "dbscan_params",
+            eps_km=EPS_KM,
+            min_samples=MIN_SAMPLES,
+        )
+        tb.add_geometry_step(
+            "cluster_bboxes",
+            bboxes=[cluster_bboxes[-1]],
+        )
+        tb.set_probability_components(
+            **probability_components(len(points), len(matches))
+        )
+
+        forecast = {
+            "id": str(uuid.uuid4()),
+            "issued_at": now,
+            "valid_from": now,
+            "valid_until": valid_until,
+            "disaster_class": "wildfire",
+            "geometry": json.dumps(geom_geojson),
+            "probability": prob,
+            "skill_id": SKILL_ID,
+            "skill_version": SKILL_VERSION,
+            "contributing_signal_ids": contributing,
+            "reasoning": reasoning,
+            "is_baseline": False,
+            "trace": json.dumps(tb.build()),
+        }
+        insert_forecast(db, forecast)
+        written += 1
+        print(f"[{SKILL_ID}]   cluster#{label}: "
+              f"n={len(points)} p={prob} alerts={len(matches)}")
+
+    db.commit()
+    print(f"[{SKILL_ID}] wrote {written} forecasts.")
+    return written
+
+
+def main() -> int:
+    now = parse_now()
+    with psycopg.connect(DATABASE_URL, autocommit=False) as db:
+        run(now, db)
     return 0
 
 

@@ -17,16 +17,31 @@ The kill switch does **not** stop:
 
 To halt Curator mutation right now:
 
+**Modal (production curator since v2 Day 4):**
+
+```sh
+python -m modal secret create envision-neon \
+  DATABASE_URL='...' \
+  ANTHROPIC_API_KEY='...' \
+  ENVISION_CURATOR_ENABLED=false
+```
+
+Include all keys — Modal replaces the entire secret.
+
+**Legacy local env** (Hermes curator retired; kept for reference):
+
 ```sh
 echo 'ENVISION_CURATOR_ENABLED=false' >> ~/.hermes/.env
-# Then restart any running Hermes processes so they re-read the env.
 ```
 
 To re-enable:
 
 ```sh
-# Edit ~/.hermes/.env and set ENVISION_CURATOR_ENABLED=true
-# (or remove the line entirely — the default is enabled)
+# Modal: recreate envision-neon with ENVISION_CURATOR_ENABLED=true (or omit the key)
+python -m modal secret create envision-neon DATABASE_URL='...' ANTHROPIC_API_KEY='...' ENVISION_CURATOR_ENABLED=true
+
+# Legacy local env only:
+# Edit ~/.hermes/.env and set ENVISION_CURATOR_ENABLED=true (or remove the line)
 ```
 
 Verify current state:

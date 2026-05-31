@@ -19,6 +19,7 @@ Optional env:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -26,6 +27,7 @@ from datetime import datetime, timezone
 
 import httpx
 import psycopg
+from psycopg import Connection
 
 ALERTS_URL = "https://api.weather.gov/alerts/active"
 DEFAULT_EVENTS = "Fire Weather Watch,Red Flag Warning,Fire Warning"
@@ -39,6 +41,18 @@ USER_AGENT = os.environ.get(
 )
 HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/geo+json"}
 
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+def parse_now(argv: list[str] | None = None) -> datetime:
+    p = argparse.ArgumentParser(description="Ingest NWS fire-weather alerts")
+    p.add_argument("--now", default=None, help="ISO8601 UTC run time (default: now)")
+    args = p.parse_args(argv)
+    if args.now is None:
+        return datetime.now(timezone.utc)
+    dt = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
 
 def get_json(client: httpx.Client, url: str) -> dict | None:
     try:
@@ -49,7 +63,7 @@ def get_json(client: httpx.Client, url: str) -> dict | None:
         return None
 
 
-def parse_ts(props: dict) -> datetime:
+def parse_ts(props: dict, now: datetime) -> datetime:
     for key in ("onset", "effective", "sent"):
         val = props.get(key)
         if val:
@@ -57,7 +71,7 @@ def parse_ts(props: dict) -> datetime:
                 return datetime.fromisoformat(val).astimezone(timezone.utc)
             except ValueError:
                 pass
-    return datetime.now(timezone.utc)
+    return now
 
 
 def zone_geometry(client: httpx.Client, url: str, cache: dict) -> dict | None:
@@ -69,7 +83,7 @@ def zone_geometry(client: httpx.Client, url: str, cache: dict) -> dict | None:
     return geom
 
 
-def collect_signals(client: httpx.Client) -> list[dict]:
+def collect_signals(client: httpx.Client, now: datetime) -> list[dict]:
     fc = get_json(client, ALERTS_URL)
     if not fc or "features" not in fc:
         sys.exit("Could not fetch NWS active alerts (check NWS_USER_AGENT).")
@@ -81,15 +95,15 @@ def collect_signals(client: httpx.Client) -> list[dict]:
         if event.lower() not in EVENTS:
             continue
         base = {
-            "timestamp": parse_ts(props),
+            "timestamp": parse_ts(props, now),
             "source": "nws_alerts",
             "signal_type": "fire_warning",
+            "ingested_at": now,
         }
         geom = feat.get("geometry")
         if geom:
             out.append({**base, "geometry": json.dumps(geom), "payload": json.dumps(props)})
             continue
-        # No direct geometry: emit one signal per resolved affected zone.
         for zurl in props.get("affectedZones") or []:
             zgeom = zone_geometry(client, zurl, zone_cache)
             if not zgeom:
@@ -99,36 +113,43 @@ def collect_signals(client: httpx.Client) -> list[dict]:
     return out
 
 
-def insert_many(rows: list[dict]) -> int:
-    dsn = os.environ.get("DATABASE_URL")
-    if not dsn:
-        sys.exit("DATABASE_URL is not set. Add it to ~/.hermes/.env")
+def insert_many(db: Connection, rows: list[dict]) -> int:
     sql = """
-        INSERT INTO signals ("timestamp", source, signal_type, geometry, payload)
+        INSERT INTO signals ("timestamp", source, signal_type, geometry, payload, ingested_at)
         VALUES (
             %(timestamp)s, %(source)s, %(signal_type)s,
             ST_Force2D(ST_SetSRID(ST_GeomFromGeoJSON(%(geometry)s), 4326)),
-            %(payload)s::jsonb
+            %(payload)s::jsonb,
+            %(ingested_at)s
         );
     """
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(sql, rows)
-        conn.commit()
+    with db.cursor() as cur:
+        cur.executemany(sql, rows)
+    db.commit()
     return len(rows)
 
 
-def main() -> None:
+def run(now: datetime, db: Connection) -> int:
     with httpx.Client() as client:
-        rows = collect_signals(client)
+        rows = collect_signals(client, now)
     if not rows:
         print(
             f"No active alerts matched events {sorted(EVENTS)}. "
             "(Fire-weather alerts are seasonal/regional — an empty result can be normal.)"
         )
-        return
-    n = insert_many(rows)
+        return 0
+    n = insert_many(db, rows)
     print(f"Inserted {n} NWS fire-weather signals.")
+    return n
+
+
+def main() -> int:
+    if not DATABASE_URL:
+        sys.exit("DATABASE_URL is not set. Add it to ~/.hermes/.env")
+    now = parse_now()
+    with psycopg.connect(DATABASE_URL) as db:
+        run(now, db)
+    return 0
 
 
 if __name__ == "__main__":

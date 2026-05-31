@@ -50,6 +50,23 @@ export default function AboutPage() {
         <li>Envision does not provide individual-location risk assessments.</li>
       </ul>
 
+      <h2 className="mt-10 text-xl font-semibold">Scoring terms</h2>
+      <ul className="mt-3 list-disc pl-6 text-neutral-700 space-y-2 text-sm">
+        <li title="Brier score: a calibration metric for probabilistic forecasts. Lower is better. A perfect skill scores 0; random guessing scores around 0.25.">
+          <strong>Brier score</strong> — calibration metric for probabilistic
+          forecasts. Lower is better. A perfect skill scores 0; random guessing
+          scores around 0.25.
+        </li>
+        <li title="Hit: forecast issued and a matching ground-truth event occurred within the validity window.">
+          <strong>Hit</strong> — a forecast was issued and a matching
+          ground-truth event occurred within the validity window.
+        </li>
+        <li title="False positive: forecast issued but no matching ground-truth event occurred within the validity window.">
+          <strong>False positive</strong> — a forecast was issued but no
+          matching ground-truth event occurred within the validity window.
+        </li>
+      </ul>
+
       <h2 className="mt-10 text-xl font-semibold">Data sources</h2>
       <ul className="mt-3 list-disc pl-6 text-neutral-700 space-y-1">
         <li>

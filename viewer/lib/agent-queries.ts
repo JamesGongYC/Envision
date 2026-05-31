@@ -99,3 +99,117 @@ export async function getRecentProposals(limit = 10): Promise<ProposalRow[]> {
   `;
   return rows as unknown as ProposalRow[];
 }
+
+export async function getActiveSkillCount(): Promise<number> {
+  const rows = await sql`
+    SELECT count(DISTINCT skill_id)::int AS n
+    FROM forecasts
+    WHERE issued_at > now() - interval '24 hours'
+  `;
+  return (rows[0] as { n: number }).n;
+}
+
+export async function getLastIngestionTimestamp(): Promise<string | null> {
+  const rows = await sql`
+    SELECT max(ingested_at) AS ts FROM signals
+  `;
+  const ts = (rows[0] as { ts: string | null }).ts;
+  return ts ?? null;
+}
+
+export async function getLastCuratorActivity(): Promise<string | null> {
+  const rows = await sql`
+    SELECT max(proposed_at) AS ts FROM skill_edit_proposals
+  `;
+  const ts = (rows[0] as { ts: string | null }).ts;
+  return ts ?? null;
+}
+
+export interface SkillCardStats {
+  skill_id: string;
+  current_version: number | null;
+  brier_mean: number | null;
+  hits: number;
+  false_positives: number;
+  eval_count: number;
+}
+
+export interface SkillVersionBrier {
+  skill_id: string;
+  skill_version: number;
+  brier: number;
+}
+
+export async function getSkillCardStats(): Promise<SkillCardStats[]> {
+  const rows = await sql`
+    SELECT
+      f.skill_id,
+      max(f.skill_version)::int AS current_version,
+      avg(e.brier_contribution)::float AS brier_mean,
+      coalesce(sum(CASE WHEN e.outcome = 'hit' THEN 1 ELSE 0 END), 0)::int AS hits,
+      coalesce(sum(CASE WHEN e.outcome = 'false_positive' THEN 1 ELSE 0 END), 0)::int
+        AS false_positives,
+      count(e.id)::int AS eval_count
+    FROM forecasts f
+    LEFT JOIN evaluations e ON e.forecast_id = f.id
+    WHERE f.issued_at > now() - interval '30 days'
+    GROUP BY f.skill_id
+    ORDER BY f.skill_id
+  `;
+  return rows as unknown as SkillCardStats[];
+}
+
+export async function getBrierByVersion(): Promise<SkillVersionBrier[]> {
+  const rows = await sql`
+    SELECT
+      f.skill_id,
+      f.skill_version::int AS skill_version,
+      avg(e.brier_contribution)::float AS brier
+    FROM forecasts f
+    JOIN evaluations e ON e.forecast_id = f.id
+    WHERE f.issued_at > now() - interval '30 days'
+    GROUP BY f.skill_id, f.skill_version
+    ORDER BY f.skill_id, f.skill_version
+  `;
+  return rows as unknown as SkillVersionBrier[];
+}
+
+export interface SkillCardViewModel {
+  id: string;
+  displayName: string;
+  plainDescription: string;
+  currentVersion: number | null;
+  brierMean: number | null;
+  hits: number;
+  falsePositives: number;
+  brierByVersion: { version: number; brier: number }[];
+}
+
+export async function buildSkillCards(): Promise<SkillCardViewModel[]> {
+  const { getSkillMetadata } = await import('./skill-metadata');
+  const [stats, byVersion] = await Promise.all([
+    getSkillCardStats(),
+    getBrierByVersion(),
+  ]);
+
+  const versionMap = new Map<string, { version: number; brier: number }[]>();
+  for (const row of byVersion) {
+    const list = versionMap.get(row.skill_id) ?? [];
+    list.push({ version: row.skill_version, brier: row.brier });
+    versionMap.set(row.skill_id, list);
+  }
+
+  return stats.map((s) => {
+    const meta = getSkillMetadata(s.skill_id);
+    return {
+      id: s.skill_id,
+      displayName: meta?.displayName ?? s.skill_id,
+      plainDescription: meta?.plainDescription ?? '',
+      currentVersion: s.current_version,
+      brierMean: s.brier_mean,
+      hits: s.hits,
+      falsePositives: s.false_positives,
+      brierByVersion: versionMap.get(s.skill_id) ?? [],
+    };
+  });
+}

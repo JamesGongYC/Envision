@@ -20,14 +20,22 @@ Notes:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import psycopg
+from psycopg import Connection
 from shapely.geometry import shape
+
+_AGENT_LIB = Path(__file__).resolve().parents[4] / "lib"
+if str(_AGENT_LIB) not in sys.path:
+    sys.path.insert(0, str(_AGENT_LIB))
+from trace_builder import TraceBuilder  # noqa: E402
 
 # --- config ---------------------------------------------------------------
 SKILL_ID = "wildfire_rapid_growth"
@@ -44,7 +52,6 @@ if not DATABASE_URL:
     sys.exit(2)
 
 
-# --- query ---------------------------------------------------------------
 GROWTH_QUERY = """
 WITH snapped AS (
   SELECT
@@ -54,23 +61,24 @@ WITH snapped AS (
   FROM signals s
   WHERE s.signal_type = 'hotspot'
     AND s.source LIKE 'firms%%'
-    AND s.timestamp > now() - interval '72 hours'
+    AND s.timestamp > %(now)s - interval '72 hours'
+    AND s.timestamp <= %(now)s
 ),
 counted AS (
   SELECT
     snap_pt,
     COUNT(*) FILTER (
-      WHERE timestamp > now() - interval '24 hours'
+      WHERE timestamp > %(now)s - interval '24 hours'
     ) AS day_t,
     COUNT(*) FILTER (
-      WHERE timestamp <= now() - interval '24 hours'
-        AND timestamp >  now() - interval '48 hours'
+      WHERE timestamp <= %(now)s - interval '24 hours'
+        AND timestamp >  %(now)s - interval '48 hours'
     ) AS day_t1,
     COUNT(*) FILTER (
-      WHERE timestamp <= now() - interval '48 hours'
+      WHERE timestamp <= %(now)s - interval '48 hours'
     ) AS day_t2,
     array_agg(id) FILTER (
-      WHERE timestamp > now() - interval '48 hours'
+      WHERE timestamp > %(now)s - interval '48 hours'
     ) AS recent_ids
   FROM snapped
   GROUP BY snap_pt
@@ -98,16 +106,69 @@ ORDER BY day_t DESC;
 """
 
 
+def parse_now(argv: list[str] | None = None) -> datetime:
+    p = argparse.ArgumentParser(description="Detect wildfire rapid growth")
+    p.add_argument("--now", default=None, help="ISO8601 UTC cutoff (default: now)")
+    args = p.parse_args(argv)
+    if args.now is None:
+        return datetime.now(timezone.utc)
+    dt = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 # --- scoring -------------------------------------------------------------
+def probability_components(day_t: int, day_t1: int, day_t2: int) -> dict:
+    base = 0.45
+    persistence_factor = min(0.20, 0.01 * day_t)
+    compound = (day_t / max(1, day_t1)) * (day_t1 / max(1, day_t2))
+    growth_factor = min(0.20, max(0.0, 0.05 * (compound - 2.25)))
+    return {
+        "base": base,
+        "growth_factor": growth_factor,
+        "persistence_factor": persistence_factor,
+    }
+
+
 def score_probability(day_t: int, day_t1: int, day_t2: int) -> float:
     """Crude additive score; DB CHECK caps at 0.85."""
-    base = 0.45
-    # bonus for absolute current activity (caps at 20 hotspots/cell)
-    count_bonus = min(0.20, 0.01 * day_t)
-    # bonus for compound growth beyond the 1.5x*1.5x = 2.25x floor
-    compound = (day_t / max(1, day_t1)) * (day_t1 / max(1, day_t2))
-    growth_bonus = min(0.20, max(0.0, 0.05 * (compound - 2.25)))
-    return round(min(0.85, base + count_bonus + growth_bonus), 3)
+    parts = probability_components(day_t, day_t1, day_t2)
+    return round(
+        min(
+            0.85,
+            parts["base"] + parts["persistence_factor"] + parts["growth_factor"],
+        ),
+        3,
+    )
+
+
+def hotspot_window_counts(conn: Connection, now: datetime) -> tuple[int, int]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              COUNT(*) FILTER (
+                WHERE timestamp > %s - interval '24 hours'
+              )::int AS last_24h,
+              COUNT(*) FILTER (
+                WHERE timestamp <= %s - interval '24 hours'
+                  AND timestamp > %s - interval '48 hours'
+              )::int AS prior_24h
+            FROM signals
+            WHERE signal_type = 'hotspot'
+              AND source LIKE 'firms%%'
+              AND timestamp > %s - interval '72 hours'
+              AND timestamp <= %s
+            """,
+            (now, now, now, now, now),
+        )
+        row = cur.fetchone()
+        return (row[0] or 0, row[1] or 0)
+
+
+def cell_bbox(cell_geom) -> list[float]:
+    geom_shape = shape(cell_geom)
+    minx, miny, maxx, maxy = geom_shape.bounds
+    return [float(minx), float(miny), float(maxx), float(maxy)]
 
 
 def build_reasoning(day_t, day_t1, day_t2, centroid_lonlat) -> str:
@@ -120,7 +181,7 @@ def build_reasoning(day_t, day_t1, day_t2, centroid_lonlat) -> str:
 
 
 # --- write ---------------------------------------------------------------
-def insert_forecast(conn, forecast: dict) -> None:
+def insert_forecast(conn: Connection, forecast: dict) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -128,7 +189,7 @@ def insert_forecast(conn, forecast: dict) -> None:
               id, issued_at, valid_from, valid_until,
               disaster_class, geometry, probability,
               skill_id, skill_version, contributing_signal_ids,
-              reasoning, is_baseline
+              reasoning, is_baseline, trace
             ) VALUES (
               %(id)s, %(issued_at)s, %(valid_from)s, %(valid_until)s,
               %(disaster_class)s,
@@ -136,66 +197,98 @@ def insert_forecast(conn, forecast: dict) -> None:
               %(probability)s,
               %(skill_id)s, %(skill_version)s,
               %(contributing_signal_ids)s::uuid[],
-              %(reasoning)s, %(is_baseline)s
+              %(reasoning)s, %(is_baseline)s,
+              %(trace)s::jsonb
             )
             """,
             forecast,
         )
 
 
-# --- main ----------------------------------------------------------------
-def main() -> int:
-    now = datetime.now(timezone.utc)
+# --- run -----------------------------------------------------------------
+def run(now: datetime, db: Connection) -> int:
     valid_until = now + timedelta(hours=FORECAST_VALID_HOURS)
 
-    with psycopg.connect(DATABASE_URL, autocommit=False) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                GROWTH_QUERY,
-                {"cell": CELL_SIZE_M, "thresh": GROWTH_THRESHOLD},
-            )
-            rows = cur.fetchall()
+    with db.cursor() as cur:
+        cur.execute(
+            GROWTH_QUERY,
+            {"cell": CELL_SIZE_M, "thresh": GROWTH_THRESHOLD, "now": now},
+        )
+        rows = cur.fetchall()
 
-        if not rows:
-            print(f"[{SKILL_ID}] no cells matched growth rule "
-                  f"(need ≥3 days of FIRMS history with sustained growth).")
-            return 0
+    if not rows:
+        print(f"[{SKILL_ID}] no cells matched growth rule "
+              f"(need ≥3 days of FIRMS history with sustained growth).")
+        return 0
 
-        print(f"[{SKILL_ID}] {len(rows)} growing cell(s) detected.")
+    print(f"[{SKILL_ID}] {len(rows)} growing cell(s) detected.")
 
-        written = 0
-        for day_t, day_t1, day_t2, recent_ids, cell_geom in rows:
-            geom_shape = shape(cell_geom)
-            centroid = geom_shape.centroid
+    last_24h, prior_24h = hotspot_window_counts(db, now)
+    growing_cells = []
+    for idx, (day_t, day_t1, day_t2, _recent_ids, _cell_geom) in enumerate(rows):
+        ratio = float(day_t) / max(1, day_t1)
+        growing_cells.append({
+            "cell_id": str(idx),
+            "growth_ratio": round(ratio, 3),
+            "days_consecutive": 2,
+        })
 
-            prob = score_probability(day_t, day_t1, day_t2)
-            reasoning = build_reasoning(
-                day_t, day_t1, day_t2, (centroid.x, centroid.y)
-            )
+    written = 0
+    for idx, (day_t, day_t1, day_t2, recent_ids, cell_geom) in enumerate(rows):
+        geom_shape = shape(cell_geom)
+        centroid = geom_shape.centroid
 
-            contributing = [str(u) for u in (recent_ids or [])]
+        prob = score_probability(day_t, day_t1, day_t2)
+        reasoning = build_reasoning(
+            day_t, day_t1, day_t2, (centroid.x, centroid.y)
+        )
 
-            forecast = {
-                "id": str(uuid.uuid4()),
-                "issued_at": now,
-                "valid_from": now,
-                "valid_until": valid_until,
-                "disaster_class": "wildfire",
-                "geometry": json.dumps(cell_geom),
-                "probability": prob,
-                "skill_id": SKILL_ID,
-                "skill_version": SKILL_VERSION,
-                "contributing_signal_ids": contributing,
-                "reasoning": reasoning,
-                "is_baseline": False,
-            }
-            insert_forecast(conn, forecast)
-            written += 1
-            print(f"[{SKILL_ID}]   cell @ ({centroid.y:.2f}, {centroid.x:.2f}): "
-                  f"{day_t2}→{day_t1}→{day_t} p={prob}")
+        contributing = [str(u) for u in (recent_ids or [])]
 
-        conn.commit()
-        print(f"[{SKILL_ID}] wrote {written} forecasts.")
+        tb = TraceBuilder(now, SKILL_ID)
+        tb.set_inputs(
+            hotspot_count_last_24h=last_24h,
+            hotspot_count_prior_24h=prior_24h,
+        )
+        tb.set_intermediate(
+            growing_cells=[growing_cells[idx]],
+            threshold_met_count=len(rows),
+        )
+        tb.add_geometry_step(
+            "cell_boundaries_emitted",
+            bboxes=[cell_bbox(cell_geom)],
+        )
+        tb.set_probability_components(**probability_components(day_t, day_t1, day_t2))
+
+        forecast = {
+            "id": str(uuid.uuid4()),
+            "issued_at": now,
+            "valid_from": now,
+            "valid_until": valid_until,
+            "disaster_class": "wildfire",
+            "geometry": json.dumps(cell_geom),
+            "probability": prob,
+            "skill_id": SKILL_ID,
+            "skill_version": SKILL_VERSION,
+            "contributing_signal_ids": contributing,
+            "reasoning": reasoning,
+            "is_baseline": False,
+            "trace": json.dumps(tb.build()),
+        }
+        insert_forecast(db, forecast)
+        written += 1
+        print(f"[{SKILL_ID}]   cell @ ({centroid.y:.2f}, {centroid.x:.2f}): "
+              f"{day_t2}→{day_t1}→{day_t} p={prob}")
+
+    db.commit()
+    print(f"[{SKILL_ID}] wrote {written} forecasts.")
+    return written
+
+
+def main() -> int:
+    now = parse_now()
+    with psycopg.connect(DATABASE_URL, autocommit=False) as db:
+        run(now, db)
     return 0
 
 

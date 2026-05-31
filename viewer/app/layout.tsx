@@ -1,7 +1,10 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { DisclaimerBanner } from '@/components/disclaimer-banner';
+import { StatusHeader } from '@/components/status-header';
 import './globals.css';
+
+export const revalidate = 60;
 
 export const metadata: Metadata = {
   title: {
@@ -21,6 +24,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-screen flex flex-col bg-white text-neutral-900 antialiased">
+        <StatusHeader />
         <DisclaimerBanner />
         <header className="border-b border-neutral-200 shrink-0">
           <nav className="container mx-auto px-4 py-3 flex items-center gap-6 text-sm">

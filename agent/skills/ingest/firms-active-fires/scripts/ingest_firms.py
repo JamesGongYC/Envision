@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Envision ingestion: NASA FIRMS active fire hotspots -> signals.
 
-Fetches near-real-time fire detections (MODIS/VIIRS) for a bounding box and
-writes each hotspot as a point Signal in PostGIS.
+Fetches near-real-time fire detections (MODIS/VIIRS) across six continental
+bounding boxes and writes each hotspot as a point Signal in PostGIS.
 
 FIRMS Area API:
   https://firms.modaps.eosdis.nasa.gov/api/area/csv/[KEY]/[SOURCE]/[AREA]/[DAYS]
@@ -12,14 +12,15 @@ Requires:
   - env DATABASE_URL    (Neon connection string)
   - env FIRMS_MAP_KEY   (from https://firms.modaps.eosdis.nasa.gov/api/map_key/)
 Optional env:
-  - FIRMS_SOURCE   (default VIIRS_NOAA20_NRT)
-  - FIRMS_AREA     (default western US bbox; 'world' for global)
   - FIRMS_DAYS     (default 1)
-  - FIRMS_MAX_ROWS (default 2000 — safety cap so 'world' can't flood the DB)
+  - FIRMS_MAX_ROWS (default 8000 per bbox/source call)
+  - FIRMS_AREA     (debug override: single bbox instead of 6-region loop)
+  - FIRMS_SOURCE   (debug override: single source instead of VIIRS+MODIS)
 """
 
 from __future__ import annotations
 
+import argparse
 import csv
 import io
 import json
@@ -29,38 +30,39 @@ from datetime import datetime, timezone
 
 import httpx
 import psycopg
+from psycopg import Connection
 
 BASE = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 
-SOURCE = os.environ.get("FIRMS_SOURCE", "VIIRS_NOAA20_NRT")
-AREA = os.environ.get("FIRMS_AREA", "-125,31,-103,49")   # western US
 DAYS = os.environ.get("FIRMS_DAYS", "1")
-MAX_ROWS = int(os.environ.get("FIRMS_MAX_ROWS", "2000"))
+MAX_ROWS = int(os.environ.get("FIRMS_MAX_ROWS", "8000"))
+
+SOURCES = ("VIIRS_NOAA20_NRT", "MODIS_NRT")
+
+REGIONS: list[tuple[str, str]] = [
+    ("North America", "-170,15,-50,80"),
+    ("South America", "-90,-60,-30,15"),
+    ("Europe", "-15,35,60,80"),
+    ("Africa", "-20,-40,55,40"),
+    ("Asia", "60,-10,180,80"),
+    ("Oceania", "110,-50,180,10"),
+]
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 
-def fetch_hotspots() -> list[dict]:
-    key = os.environ.get("FIRMS_MAP_KEY")
-    if not key:
-        sys.exit(
-            "FIRMS_MAP_KEY is not set. Get one at "
-            "https://firms.modaps.eosdis.nasa.gov/api/map_key/ and add it to ~/.hermes/.env"
-        )
-    url = f"{BASE}/{key}/{SOURCE}/{AREA}/{DAYS}"
-    resp = httpx.get(url, timeout=60.0)
-    resp.raise_for_status()
-    text = resp.text
-    # A valid response is CSV whose header contains 'latitude'.
-    first_line = text.split("\n", 1)[0].lower()
-    if "latitude" not in first_line:
-        sys.exit(
-            "FIRMS returned an unexpected response (check your MAP_KEY / params):\n"
-            + text[:300]
-        )
-    return list(csv.DictReader(io.StringIO(text)))
+def parse_now(argv: list[str] | None = None) -> datetime:
+    p = argparse.ArgumentParser(description="Ingest FIRMS active fire hotspots")
+    p.add_argument("--now", default=None, help="ISO8601 UTC run time (default: now)")
+    args = p.parse_args(argv)
+    if args.now is None:
+        return datetime.now(timezone.utc)
+    dt = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def normalize_source() -> str:
-    s = SOURCE.upper()
+def normalize_source(source: str) -> str:
+    s = source.upper()
     if "VIIRS" in s:
         return "firms_viirs"
     if "MODIS" in s:
@@ -68,7 +70,39 @@ def normalize_source() -> str:
     return "firms"
 
 
-def to_params(row: dict, source_label: str) -> dict | None:
+def fetch_hotspots(source: str, bbox: str, region: str) -> list[dict] | None:
+    """Return CSV rows or None on failure (logged, non-fatal)."""
+    key = os.environ.get("FIRMS_MAP_KEY")
+    if not key:
+        sys.exit(
+            "FIRMS_MAP_KEY is not set. Get one at "
+            "https://firms.modaps.eosdis.nasa.gov/api/map_key/ and add it to ~/.hermes/.env"
+        )
+    url = f"{BASE}/{key}/{source}/{bbox}/{DAYS}"
+    try:
+        resp = httpx.get(url, timeout=60.0)
+        resp.raise_for_status()
+    except httpx.HTTPError as e:
+        print(f"[firms] WARNING: {region} {source} request failed: {e}", file=sys.stderr)
+        return None
+    text = resp.text
+    first_line = text.split("\n", 1)[0].lower()
+    if "latitude" not in first_line:
+        print(
+            f"[firms] WARNING: {region} {source} unexpected response:\n{text[:200]}",
+            file=sys.stderr,
+        )
+        return None
+    rows = list(csv.DictReader(io.StringIO(text)))
+    if len(rows) > MAX_ROWS:
+        print(
+            f"[firms] Capping {region} {source}: {len(rows)} -> {MAX_ROWS} hotspots."
+        )
+        rows = rows[:MAX_ROWS]
+    return rows
+
+
+def to_params(row: dict, source_label: str, now: datetime) -> dict | None:
     try:
         lon = float(row["longitude"])
         lat = float(row["latitude"])
@@ -80,7 +114,7 @@ def to_params(row: dict, source_label: str) -> dict | None:
             f"{row['acq_date']} {hhmm}", "%Y-%m-%d %H%M"
         ).replace(tzinfo=timezone.utc)
     except (KeyError, ValueError):
-        ts = datetime.now(timezone.utc)
+        ts = now
     geometry = {"type": "Point", "coordinates": [lon, lat]}
     return {
         "timestamp": ts,
@@ -88,45 +122,82 @@ def to_params(row: dict, source_label: str) -> dict | None:
         "signal_type": "hotspot",
         "geometry": json.dumps(geometry),
         "payload": json.dumps(row),
+        "ingested_at": now,
     }
 
 
-def insert_many(rows: list[dict]) -> int:
-    dsn = os.environ.get("DATABASE_URL")
-    if not dsn:
-        sys.exit("DATABASE_URL is not set. Add it to ~/.hermes/.env")
+def insert_many(db: Connection, rows: list[dict]) -> int:
+    if not rows:
+        return 0
     sql = """
-        INSERT INTO signals ("timestamp", source, signal_type, geometry, payload)
+        INSERT INTO signals ("timestamp", source, signal_type, geometry, payload, ingested_at)
         VALUES (
             %(timestamp)s, %(source)s, %(signal_type)s,
             ST_Force2D(ST_SetSRID(ST_GeomFromGeoJSON(%(geometry)s), 4326)),
-            %(payload)s::jsonb
+            %(payload)s::jsonb,
+            %(ingested_at)s
         );
     """
-    with psycopg.connect(dsn) as conn:
-        with conn.cursor() as cur:
-            cur.executemany(sql, rows)
-        conn.commit()
+    with db.cursor() as cur:
+        cur.executemany(sql, rows)
+    db.commit()
     return len(rows)
 
 
-def main() -> None:
-    source_label = normalize_source()
-    raw = fetch_hotspots()
-    params = [p for r in raw if (p := to_params(r, source_label)) is not None]
-    if not params:
-        print(
-            f"No hotspots returned for area={AREA} source={SOURCE}. "
-            "Try a larger box or FIRMS_AREA=world."
-        )
-        return
-    if len(params) > MAX_ROWS:
-        print(f"Capping {len(params)} hotspots to FIRMS_MAX_ROWS={MAX_ROWS}.")
-        params = params[:MAX_ROWS]
-    n = insert_many(params)
-    print(f"Inserted {n} FIRMS hotspots (source={source_label}, area={AREA}).")
+def iter_queries() -> list[tuple[str, str, str]]:
+    """Return (region_name, source, bbox) for each API call."""
+    debug_area = os.environ.get("FIRMS_AREA")
+    debug_source = os.environ.get("FIRMS_SOURCE")
+    if debug_area or debug_source:
+        regions = [("debug", debug_area or REGIONS[0][1])]
+        sources = [debug_source] if debug_source else list(SOURCES)
+    else:
+        regions = REGIONS
+        sources = list(SOURCES)
+    return [
+        (region_name, source, bbox)
+        for region_name, bbox in regions
+        for source in sources
+    ]
+
+
+def run(now: datetime, db: Connection) -> tuple[int, int]:
+    """Returns (rows_inserted, queries_succeeded)."""
+    params: list[dict] = []
+    succeeded = 0
+    failed = 0
+
+    for region_name, source, bbox in iter_queries():
+        raw = fetch_hotspots(source, bbox, region_name)
+        if raw is None:
+            failed += 1
+            continue
+        succeeded += 1
+        label = normalize_source(source)
+        batch = [p for r in raw if (p := to_params(r, label, now)) is not None]
+        params.extend(batch)
+        print(f"[firms] {region_name} {source}: fetched {len(batch)} hotspots.")
+
+    if succeeded == 0:
+        print("[firms] All bbox/source queries failed.", file=sys.stderr)
+        return 0, 0
+
+    n = insert_many(db, params)
+    print(
+        f"[firms] Inserted {n} FIRMS hotspots "
+        f"({succeeded} queries ok, {failed} failed)."
+    )
+    return n, succeeded
+
+
+def main() -> int:
+    if not DATABASE_URL:
+        sys.exit("DATABASE_URL is not set. Add it to ~/.hermes/.env")
+    now = parse_now()
+    with psycopg.connect(DATABASE_URL) as db:
+        _n, succeeded = run(now, db)
+    return 0 if succeeded > 0 else 1
 
 
 if __name__ == "__main__":
-    main()
-
+    sys.exit(main())
