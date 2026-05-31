@@ -2,10 +2,12 @@
 
 import { useState } from 'react';
 import { LAYER_TREE } from '@/lib/layer-state';
+import { useLayerTruncation } from '@/components/layer-truncation-provider';
 import { useLayerVisibility } from '@/components/layer-visibility-provider';
 
 export function MapLayerPanel() {
   const { visibility, toggle } = useLayerVisibility();
+  const { truncation } = useLayerTruncation();
   const [open, setOpen] = useState(true);
 
   if (!open) {
@@ -60,16 +62,25 @@ export function MapLayerPanel() {
                     </li>
                   );
                 }
+                const cap = truncation[layer.id];
                 return (
-                  <li key={layer.id} className="flex items-start gap-2 px-1 py-0.5">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggle(layer.id)}
-                      className="mt-0.5 cursor-pointer"
-                      aria-label={layer.label}
-                    />
-                    <span className="text-slate-800 leading-snug">{layer.label}</span>
+                  <li key={layer.id} className="px-1 py-0.5">
+                    <div className="flex items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggle(layer.id)}
+                        className="mt-0.5 cursor-pointer"
+                        aria-label={layer.label}
+                      />
+                      <span className="text-slate-800 leading-snug">{layer.label}</span>
+                    </div>
+                    {checked && cap?.truncated && (
+                      <div className="pl-6 text-[10px] text-slate-500 mt-0.5">
+                        showing {cap.returnedCount.toLocaleString()} of{' '}
+                        {cap.totalCount.toLocaleString()}
+                      </div>
+                    )}
                   </li>
                 );
               })}

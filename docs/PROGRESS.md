@@ -394,3 +394,79 @@ Hermes CLI on Windows: `python -c "import sys; sys.argv=['hermes','cron','list']
 **Build:** `cd viewer && npm run build` — passed (Next.js 16.2.6).
 
 **Manual smoke:** toggle Active forecasts off/on; reload persists `envision.layers`. Vercel preview deploy — operator.
+
+---
+
+## v2.5 Day 2 — Ingestion migrations + point signal layers
+
+**Date:** 2026-05-30
+
+### Track A — Five ingestion Modal apps
+
+| App | Schedule (UTC) | Smoke |
+|---|---|---|
+| [`open-meteo-fire-weather`](../agent/modal_skills/open-meteo-fire-weather/) | `0 */3 * * *` | 61 `fire_weather` signals from 118 regions — https://modal.com/apps/jamesgongyc/main/ap-TQrAPIzGGZS895iTajJvze |
+| [`nhc-cyclones`](../agent/modal_skills/nhc-cyclones/) | `0 */3 * * *` | 0 storms (off-season OK) — https://modal.com/apps/jamesgongyc/main/ap-ps5sQuCQ6DJaxsX3yRTeUH |
+| [`jtwc-cyclones`](../agent/modal_skills/jtwc-cyclones/) | `0 */6 * * *` | **HTTP 403** from `metoc.navy.mil` on Modal US IP (browser UA default did not unblock); 0 inserts; fixture parser unchanged — https://modal.com/apps/jamesgongyc/main/ap-Z8TCJxynOq9msaMjj3frBX |
+| [`nws-fire-alerts`](../agent/modal_skills/nws-fire-alerts/) | `*/30 * * * *` | 0 matching fire-weather alerts (seasonal OK) — https://modal.com/apps/jamesgongyc/main/ap-QiLxvPw1eCj5iRJSgJAcdv |
+| [`firms-active-fires`](../agent/modal_skills/firms-active-fires/) | `*/30 * * * *` | **Blocked:** `FIRMS_MAP_KEY` not on `envision-neon` secret — recreate secret per README |
+
+**Operator:** Add `NWS_USER_AGENT` + `FIRMS_MAP_KEY` to `envision-neon`, upgrade Modal plan, `modal deploy` Day 1 + Day 2 apps.
+
+**Hermes cron retirement:** removed FIRMS `4a6ddd35247a`, NWS `dcdedefb21fb`, NHC `3a51f8809e4c`. **`hermes cron list` → 4 jobs** (detection only).
+
+### Track B — Point signal layers
+
+- [`viewer/lib/signal-queries.ts`](../viewer/lib/signal-queries.ts), [`layer-config.ts`](../viewer/lib/layer-config.ts), [`signal-styling.ts`](../viewer/lib/signal-styling.ts)
+- [`viewer/app/api/signals/route.ts`](../viewer/app/api/signals/route.ts) — bbox + `layer_id`, 30s cache
+- [`viewer/components/signal-layer.tsx`](../viewer/components/signal-layer.tsx), [`ground-truth-layer.tsx`](../viewer/components/ground-truth-layer.tsx), [`signal-marker.tsx`](../viewer/components/signal-marker.tsx)
+- FIRMS clustering via `react-leaflet-cluster`; truncation badge in [`map-layer-panel.tsx`](../viewer/components/map-layer-panel.tsx)
+- Seven layers enabled in [`layer-state.ts`](../viewer/lib/layer-state.ts); wired in [`forecast-map-impl.tsx`](../viewer/components/forecast-map-impl.tsx)
+
+**Build:** `cd viewer && npm run build` — passed (includes `/api/signals`).
+
+**Manual smoke:** toggle each point layer; pan map for refetch; FIRMS cluster + truncation subtitle when capped. Vercel preview — operator.
+
+---
+
+## v2.5 Day 3 — Detection + reasoning + polygons + Hermes decommission
+
+**Date:** 2026-05-30
+
+### Track A — Four detection Modal apps + LLM reasoning
+
+**Shared libs:**
+
+- [`agent/lib/reasoning_llm.py`](../agent/lib/reasoning_llm.py) — `generate_reasoning(prompt, fallback)` via Anthropic Sonnet, `max_tokens=200`, never raises.
+- [`agent/lib/reasoning_prompts.py`](../agent/lib/reasoning_prompts.py) — locked prompts filled from trace `inputs` / `intermediate` after `TraceBuilder` is populated.
+
+| App | Schedule (UTC) | Smoke (2026-05-30) |
+|---|---|---|
+| [`wildfire-rapid-growth`](../agent/modal_skills/wildfire-rapid-growth/) | `*/30 * * * *` | 2 forecasts — https://modal.com/apps/jamesgongyc/main/ap-5xagLXw5LfOgufqnOEC0he |
+| [`typhoon-intensifying`](../agent/modal_skills/typhoon-intensifying/) | `0 */3 * * *` | 0 (off-season OK) — https://modal.com/apps/jamesgongyc/main/ap-yBulgIiDfTrZVWBSuDaziE |
+| [`typhoon-landfall-imminent`](../agent/modal_skills/typhoon-landfall-imminent/) | `0 */3 * * *` | 0 (off-season OK) — https://modal.com/apps/jamesgongyc/main/ap-F0cWq8wG2chi4OzZ9QtJev |
+| [`wildfire-risk-elevated`](../agent/modal_skills/wildfire-risk-elevated/) | `*/30 * * * *` | 16 forecasts; polygons from `fire_warning` + `fire_weather_grid` (NWS/ECMWF/AIFS) — https://modal.com/apps/jamesgongyc/main/ap-zEzhbRcToIStMhElJecEnk |
+
+**Deploy:** all four detectors deployed to Modal (`wildfire-rapid-growth`, `wildfire-risk-elevated`, `typhoon-intensifying`, `typhoon-landfall-imminent`). Day 1–2 ingest/housekeeping apps still need operator `modal deploy` if not yet on workspace.
+
+**Hermes cron retirement:** removed `e64e6752c68d`, `b3eeb5b0bb9e`, `0663e2ec5de8`, `521e41e0686e`. **`hermes cron list` → empty.**
+
+**Repo archive:** `agent/skills` → `agent/_archive/skills`; `tools/sync_skills.py` → `tools/_archive/sync_skills.py`. README + METHODS + modal README updated for Modal-only runtime.
+
+### Track B — Polygon layers + forecast dropdown
+
+- [`viewer/lib/signal-styling.ts`](../viewer/lib/signal-styling.ts) — `POLYGON_STYLES` (ECMWF/AIFS fire grid + stretch wind/precip).
+- [`viewer/lib/layer-config.ts`](../viewer/lib/layer-config.ts) + [`layer-state.ts`](../viewer/lib/layer-state.ts) — four polygon layers enabled.
+- [`viewer/components/polygon-signal-layer.tsx`](../viewer/components/polygon-signal-layer.tsx) — bbox fetch, zoom ≥ 4 gate, GeoJSON popups.
+- [`viewer/components/typing-text.tsx`](../viewer/components/typing-text.tsx), [`forecast-dropdown.tsx`](../viewer/components/forecast-dropdown.tsx) — typing reasoning in forecast popups; `bringToFront` on markers.
+- Wired in [`forecast-map-impl.tsx`](../viewer/components/forecast-map-impl.tsx).
+
+**Build:** `cd viewer && npm run build` — passed.
+
+**Operator closeout:** Vercel deploy from `viewer/`; git tag `v2.5.0`; confirm `envision-neon` includes `ANTHROPIC_API_KEY`, `FIRMS_MAP_KEY`, `NWS_USER_AGENT`; deploy remaining Day 1–2 Modal apps if cron quota allows.
+
+---
+
+## v2.5 complete
+
+All 12+ core Modal apps (ingest, detect, evaluate, housekeeping, GDACS, curator) documented in [`agent/modal_skills/README.md`](../agent/modal_skills/README.md). Hermes runtime retired. Viewer ships polygon layers and LLM reasoning dropdown.

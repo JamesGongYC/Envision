@@ -32,15 +32,15 @@ NHC         ─┘                                   ▼
 
 ## 2. Ingestion
 
-Hermes cron skills (synced via `tools/sync_skills.py`) plus Modal-native ingestion:
+All ingestion runs on **Modal** (`agent/modal_skills/`). Historical Hermes copies are archived under `agent/_archive/skills/`.
 
 | Skill | Source | Cadence | Writes |
 |---|---|---|---|
-| `firms-active-fires` | NASA FIRMS VIIRS + MODIS (global) | 30 min | `signals` (hotspot) |
-| `nws-fire-alerts` | NWS Alerts API | 30 min | `signals` (fire_warning) |
-| `nhc-cyclones` | NHC CurrentStorms.json | 3 h | `signals` (cyclone_advisory) |
-| `open-meteo-fire-weather` | Open-Meteo forecast API | 3 h | `signals` (fire_weather) |
-| `jtwc-cyclones` | JTWC ATCF bulletins | 6 h | `signals` (cyclone_advisory) |
+| `firms-active-fires` | NASA FIRMS VIIRS + MODIS (global) | 30 min (Modal) | `signals` (hotspot) |
+| `nws-fire-alerts` | NWS Alerts API | 30 min (Modal) | `signals` (fire_warning) |
+| `nhc-cyclones` | NHC CurrentStorms.json | 3 h (Modal) | `signals` (cyclone_advisory) |
+| `open-meteo-fire-weather` | Open-Meteo forecast API | 3 h (Modal) | `signals` (fire_weather) |
+| `jtwc-cyclones` | JTWC ATCF bulletins | 6 h (Modal) | `signals` (cyclone_advisory) |
 | `ecmwf-fire-weather-derived` | ECMWF Open Data HRES GRIB | 12 h (Modal) | `signals` (fire_weather_grid) |
 | `aifs-cyclone-feature` | ECMWF Open Data AIFS GRIB | 12 h (Modal) | `signals` (cyclone_feature) |
 | `aifs-fire-weather-grid` | ECMWF Open Data AIFS GRIB | 12 h (Modal) | `signals` (fire_weather_grid) |
@@ -61,7 +61,7 @@ score = (T > 30°C) + (dewpoint_depression > 15°C) + (wind > 6.9 m/s) + (precip
 
 Cells with `score >= 3` (configurable via `ECMWF_FW_THRESHOLD`) are grouped into contiguous polygons via connected-component labeling and `shapely.unary_union`. Each polygon becomes one `signals` row: `source='ecmwf_open_data'`, `signal_type='fire_weather_grid'`. The signal `timestamp` is the **forecast valid time** (run + 24h), not the model run time.
 
-Detectors do not consume ECMWF polygons until v2.5 (`wildfire-risk-elevated` generalization deferred).
+`wildfire-risk-elevated` (v2.5) intersects clusters with `fire_warning` and `fire_weather_grid` polygons from `nws_alerts`, `ecmwf_open_data`, and `aifs`.
 
 ### AIFS signals (v2 Day 5)
 
@@ -85,16 +85,16 @@ Note: AIFS Open Data does not expose `vo` at 850 hPa directly; cyclone vorticity
 
 ## 3. Detection
 
-Four detection skills convert raw signals into probabilistic forecasts. Each writes one or more `forecasts` rows per cycle, with `probability` capped at 0.85 by a database `CHECK` constraint.
+Four Modal detection apps (`agent/modal_skills/`) convert raw signals into probabilistic forecasts. Each writes one or more `forecasts` rows per cycle, with `probability` capped at 0.85 by a database `CHECK` constraint.
 
 | Skill | Logic |
 |---|---|
-| `wildfire_risk_elevated` | DBSCAN cluster (eps=10km, min_samples=5) on last-24h FIRMS hotspots; cluster geometry intersected with active NWS fire-weather alert polygons. |
-| `wildfire_rapid_growth` | 50km grid cell in EPSG:3857; hotspot count must grow >50% day-over-day for 2 consecutive days. |
-| `typhoon_intensifying` | NHC bulletin central pressure dropping >5 hPa over a ~12h window (±2h tolerance). |
-| `typhoon_landfall_imminent` | Forward-extrapolated 72h cone from heading + speed, buffered with growing radii (40km → 200km), intersected with GeoNames cities of pop ≥ 10⁴. |
+| `wildfire-risk-elevated` | DBSCAN cluster (eps=10km, min_samples=5) on last-24h FIRMS hotspots; cluster geometry intersected with `fire_warning` or `fire_weather_grid` from NWS, ECMWF, or AIFS. |
+| `wildfire-rapid-growth` | 50km grid cell in EPSG:3857; hotspot count must grow >50% day-over-day for 2 consecutive days. |
+| `typhoon-intensifying` | NHC bulletin central pressure dropping >5 hPa over a ~12h window (±2h tolerance). |
+| `typhoon-landfall-imminent` | Forward-extrapolated 72h cone from heading + speed, buffered with growing radii (40km → 200km), intersected with GeoNames cities of pop ≥ 10⁴. |
 
-Forecast geometry is GeoJSON polygon; reasoning is templated (no LLM call at detection time, for cost reasons). Validity windows are 24h for wildfires, 48–72h for cyclones.
+Forecast geometry is GeoJSON polygon. **Reasoning (v2.5):** after `TraceBuilder` is populated, locked prompts in `agent/lib/reasoning_prompts.py` are filled from trace fields; `generate_reasoning()` calls Claude Sonnet (`max_tokens=200`) and falls back to templated `build_reasoning()` on API failure. Validity windows are 24h for wildfires, 48–72h for cyclones.
 
 ## 4. Evaluation
 
@@ -125,13 +125,13 @@ Detection skills write structured **`forecasts.trace`** JSONB on every new forec
 - **Validation:** `python tools/validate_traces.py` (read-only Neon spot-check)
 - **Backfill:** none — older rows keep empty `{}`
 
-Hermes detection skills receive `trace_builder.py` via `tools/sync_skills.py --apply` (copied into each skill's `scripts/`). Modal curator mounts `agent/lib/` on the container image.
+Modal detection and curator apps mount `agent/lib/` at `/root/agent_lib` on the container image.
 
 ## 5. Curation
 
 Once daily, the Curator skill reads 14-day Brier statistics per detection skill and proposes parameter adjustments via Claude (`claude-sonnet-4-6`).
 
-**Runtime (v2 Day 4):** Curator runs on **Modal** (`agent/modal_skills/curator/`), scheduled 04:00 UTC. Detection skill scripts are staged into `~/.hermes/skills/` inside the container before each run. Hermes-side curator retired.
+**Runtime:** Curator runs on **Modal** (`agent/modal_skills/curator/`), scheduled 04:00 UTC. Detection skills are separate Modal apps; Hermes runtime retired v2.5.
 
 **Scope is enforced by prompt, not by sandbox.** The Curator is told it may only change numeric constants and templated reasoning strings — not function signatures, control flow, imports, SQL, or schema. The output is validated for Python syntax but not for semantic safety. Human review at promotion time is the real safety bar.
 
@@ -179,7 +179,7 @@ When disabled, the Curator exits immediately at the top of its cycle. It does no
 - The viewer from displaying data
 - Pending proposals from being reviewed
 
-To halt detection itself, remove the corresponding cron jobs with `hermes cron remove <id>`. To halt the viewer, undeploy from Vercel.
+To halt detection, stop the Modal app (`modal app stop <name>`) or pause its schedule in the Modal dashboard. To halt the viewer, undeploy from Vercel.
 
 ## 9. Known limitations
 
@@ -188,19 +188,19 @@ To halt detection itself, remove the corresponding cron jobs with `hermes cron r
 - **No JMA.** Plan §11 cut JMA Western Pacific ingestion. NHC covers Atlantic and East Pacific only.
 - **NHC cone is approximated.** Real NHC cones come from ensemble track-error statistics; we extrapolate from heading + speed buffered with rough radii.
 - **GHSL substitute.** Plan §7 called for the GHSL population raster; we substituted GeoNames cities with pop ≥ 10⁴.
-- **Reasoning is templated.** Plan §6 schema describes `reasoning` as LLM-generated. We template it at detection time for cost; the LLM is only used in the Curator.
+- **Reasoning fallback.** Detection uses Sonnet with templated fallback; empty or failed LLM calls still produce operator-readable text.
 - **Probability calibration not validated.** No published calibration plots. Brier scores accumulate but the threshold for "well-calibrated" is not formally defined for v1.
 
 ## 10. Operational defaults
 
 | Setting | Value | Where |
 |---|---|---|
-| Ingestion cadence (FIRMS, NWS) | 30 min | cron |
-| Ingestion cadence (NHC) | 3 h | cron |
-| Ingestion cadence (GDACS) | 6 h | cron |
-| Detection cadence (wildfire) | 30 min | cron |
-| Detection cadence (typhoon) | 3 h | cron |
-| Evaluator cadence | 24 h | Hermes cron |
+| Ingestion cadence (FIRMS, NWS) | 30 min | Modal |
+| Ingestion cadence (NHC) | 3 h | Modal |
+| Ingestion cadence (GDACS) | 6 h | Modal |
+| Detection cadence (wildfire) | 30 min | Modal |
+| Detection cadence (typhoon) | 3 h | Modal |
+| Evaluator cadence | 24 h | Modal |
 | Curator cadence | 24 h | Modal cron (04:00 UTC) |
 | ECMWF derived cadence | 12 h | Modal cron (04:00 + 16:00 UTC) |
 | AIFS skills cadence | 12 h | Modal crons (05:00–05:25 + 17:00–17:25 UTC) |

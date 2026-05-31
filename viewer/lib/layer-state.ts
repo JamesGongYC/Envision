@@ -73,28 +73,28 @@ export const LAYER_TREE: LayerTreeCategory[] = [
     layers: [
       {
         id: 'firms_hotspots',
-        label: 'FIRMS hotspots (coming v2.5 Day 2)',
-        enabled: false,
+        label: 'FIRMS hotspots',
+        enabled: true,
       },
       {
         id: 'nws_fire_alerts',
-        label: 'NWS fire alerts (coming v2.5 Day 2)',
-        enabled: false,
+        label: 'NWS fire alerts',
+        enabled: true,
       },
       {
         id: 'open_meteo_fire_weather',
-        label: 'Open-Meteo fire weather (coming v2.5 Day 2)',
-        enabled: false,
+        label: 'Open-Meteo fire weather',
+        enabled: true,
       },
       {
         id: 'ecmwf_fire_weather_grid',
-        label: 'ECMWF fire weather grid (coming v2.5 Day 3)',
-        enabled: false,
+        label: 'ECMWF fire weather grid',
+        enabled: true,
       },
       {
         id: 'aifs_fire_weather_grid',
-        label: 'AIFS fire weather grid (coming v2.5 Day 3)',
-        enabled: false,
+        label: 'AIFS fire weather grid',
+        enabled: true,
       },
     ],
   },
@@ -104,18 +104,18 @@ export const LAYER_TREE: LayerTreeCategory[] = [
     layers: [
       {
         id: 'nhc_advisories',
-        label: 'NHC advisories (coming v2.5 Day 2)',
-        enabled: false,
+        label: 'NHC advisories',
+        enabled: true,
       },
       {
         id: 'jtwc_advisories',
-        label: 'JTWC advisories (coming v2.5 Day 2)',
-        enabled: false,
+        label: 'JTWC advisories',
+        enabled: true,
       },
       {
         id: 'aifs_cyclone_features',
-        label: 'AIFS cyclone features (coming v2.5 Day 2)',
-        enabled: false,
+        label: 'AIFS cyclone features',
+        enabled: true,
       },
     ],
   },
@@ -125,13 +125,13 @@ export const LAYER_TREE: LayerTreeCategory[] = [
     layers: [
       {
         id: 'aifs_high_wind',
-        label: 'AIFS high wind (coming v2.5 Day 3)',
-        enabled: false,
+        label: 'AIFS high wind',
+        enabled: true,
       },
       {
         id: 'aifs_heavy_precipitation',
-        label: 'AIFS heavy precipitation (coming v2.5 Day 3)',
-        enabled: false,
+        label: 'AIFS heavy precipitation',
+        enabled: true,
       },
     ],
   },
@@ -141,8 +141,8 @@ export const LAYER_TREE: LayerTreeCategory[] = [
     layers: [
       {
         id: 'gdacs_ground_truth',
-        label: 'GDACS events (coming v2.5 Day 2)',
-        enabled: false,
+        label: 'GDACS events',
+        enabled: true,
       },
     ],
   },

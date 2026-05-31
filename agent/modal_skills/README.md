@@ -1,24 +1,31 @@
 # Modal-native skills
 
-Skills in this directory run on [Modal](https://modal.com/) — not via Hermes and **not** synced by [`tools/sync_skills.py`](../../tools/sync_skills.py).
+All Envision skills run on [Modal](https://modal.com/) as of v2.5. The retired Hermes tree lives in [`agent/_archive/skills/`](../_archive/skills/).
 
-Hermes skills live under `agent/skills/` and deploy to `~/.hermes/skills/`. Modal skills deploy with `modal deploy`.
+Shared helpers:
 
-Shared helpers for AIFS skills live in [`_shared/`](_shared/) (`aifs_common.py`, `grid.py`, `image.py`).
+- [`_shared/`](_shared/) — AIFS GRIB helpers (`aifs_common.py`, `grid.py`, `image.py`)
+- [`../lib/`](../lib/) — `trace_builder.py`, `reasoning_llm.py`, `reasoning_prompts.py` (mounted at `/root/agent_lib` on detection images)
+
+Detection apps fill LLM prompts from **trace `inputs` / `intermediate`** after `TraceBuilder` is populated — see [`reasoning_prompts.py`](../lib/reasoning_prompts.py). `generate_reasoning()` in [`reasoning_llm.py`](../lib/reasoning_llm.py) calls Sonnet (`max_tokens=200`) and falls back to templated `build_reasoning()` on any failure.
 
 ## Prerequisites
 
 1. Modal CLI: `pip install modal` then `python -m modal setup`
-2. Secret (once):
+2. Secret (recreate replaces entirely — include every field):
 
 ```bash
 python -m modal secret create envision-neon \
   DATABASE_URL='<neon-url>' \
   ANTHROPIC_API_KEY='<key>' \
-  ENVISION_CURATOR_ENABLED=true
+  ENVISION_CURATOR_ENABLED=true \
+  NWS_USER_AGENT='envision-monitor (you@example.com)' \
+  FIRMS_MAP_KEY='<firms-map-key>'
 ```
 
-## Deployed apps
+Optional: `JTWC_USER_AGENT` (browser-like string) if JTWC returns 403 from Modal.
+
+## Deployed apps (v2.5)
 
 | App | Schedule (UTC) | Purpose |
 |---|---|---|
@@ -31,43 +38,45 @@ python -m modal secret create envision-neon \
 | `aifs-heat-dome` | manual* | AIFS multi-horizon 2t → heat_dome polygons |
 | `housekeeping-retention` | 06:00 daily | Delete aged signals/forecasts; refresh `signal_catalog` |
 | `gdacs-ground-truth` | every 6h | GDACS GeoRSS → `ground_truth` |
-| `forecast-evaluator` | 07:00 daily | Match expired forecasts to ground truth; write `evaluations` |
+| `forecast-evaluator` | 07:00 daily | Match expired forecasts to ground truth |
+| `open-meteo-fire-weather` | every 3h | Open-Meteo fire weather index → `signals` |
+| `nhc-cyclones` | every 3h | NHC CurrentStorms.json → `cyclone_advisory` |
+| `jtwc-cyclones` | every 6h | JTWC ATCF WP cyclones → `cyclone_advisory` |
+| `nws-fire-alerts` | every 30m | NWS fire-weather alerts → `fire_warning` |
+| `firms-active-fires` | every 30m | FIRMS VIIRS+MODIS 6-bbox global → `hotspot` |
+| `wildfire-rapid-growth` | every 30m | Grid growth detection → `forecasts` |
+| `wildfire-risk-elevated` | every 30m | DBSCAN + NWS/ECMWF/AIFS polygons → `forecasts` |
+| `typhoon-intensifying` | every 3h | NHC pressure trend → `forecasts` |
+| `typhoon-landfall-imminent` | every 3h | Cone vs populated places → `forecasts` |
 
-\* **Modal cron limit:** starter workspace allows **5** scheduled crons. v2.5 Day 1 adds three scheduled apps (8 total with ECMWF + curator + 3 AIFS). Upgrade the workspace plan, then deploy the Day 1 apps (and optionally enable schedules on `heavy-precipitation-band` / `heat-dome`).
+\* **Modal cron limit:** upgrade workspace plan before deploying all scheduled apps (~17+ crons with full v2.5 stack).
 
 ## Commands
 
 ```bash
-# One-off smoke (set PYTHONUTF8=1 on Windows if console encoding errors)
-python -m modal run agent/modal_skills/housekeeping-retention/app.py
-python -m modal run agent/modal_skills/gdacs-ground-truth/app.py
-python -m modal run agent/modal_skills/forecast-evaluator/app.py
-python -m modal run agent/modal_skills/aifs-cyclone-feature/app.py
-python -m modal run agent/modal_skills/aifs-fire-weather-grid/app.py
-python -m modal run agent/modal_skills/aifs-high-wind-corridor/app.py
-python -m modal run agent/modal_skills/aifs-heavy-precipitation-band/app.py
-python -m modal run agent/modal_skills/aifs-heat-dome/app.py
-python -m modal run agent/modal_skills/ecmwf-fire-weather-derived/app.py
-python -m modal run agent/modal_skills/curator/app.py
+# One-off smoke (PYTHONUTF8=1 on Windows)
+python -m modal run agent/modal_skills/wildfire-rapid-growth/app.py
+python -m modal run agent/modal_skills/wildfire-risk-elevated/app.py
+python -m modal run agent/modal_skills/typhoon-intensifying/app.py
+python -m modal run agent/modal_skills/typhoon-landfall-imminent/app.py
+python -m modal run agent/modal_skills/open-meteo-fire-weather/app.py
+python -m modal run agent/modal_skills/firms-active-fires/app.py
+# ... plus housekeeping, gdacs, evaluator, curator, AIFS/ECMWF apps
 
-# Production deploy (after plan upgrade for new scheduled apps)
-python -m modal deploy agent/modal_skills/housekeeping-retention/app.py
-python -m modal deploy agent/modal_skills/gdacs-ground-truth/app.py
-python -m modal deploy agent/modal_skills/forecast-evaluator/app.py
-python -m modal deploy agent/modal_skills/aifs-cyclone-feature/app.py
-python -m modal deploy agent/modal_skills/aifs-fire-weather-grid/app.py
-python -m modal deploy agent/modal_skills/aifs-high-wind-corridor/app.py
-python -m modal deploy agent/modal_skills/aifs-heavy-precipitation-band/app.py
-python -m modal deploy agent/modal_skills/aifs-heat-dome/app.py
-python -m modal deploy agent/modal_skills/ecmwf-fire-weather-derived/app.py
-python -m modal deploy agent/modal_skills/curator/app.py
+# Production deploy (after plan upgrade if needed)
+python -m modal deploy agent/modal_skills/wildfire-rapid-growth/app.py
+python -m modal deploy agent/modal_skills/wildfire-risk-elevated/app.py
+python -m modal deploy agent/modal_skills/typhoon-intensifying/app.py
+python -m modal deploy agent/modal_skills/typhoon-landfall-imminent/app.py
+# ... all apps above
 
-# Logs
-python -m modal app logs housekeeping-retention
+python -m modal app logs wildfire-rapid-growth
 ```
 
-Disable a single AIFS signal type: stop that Modal app (`modal app stop <name>`) without affecting the others.
+Disable a single AIFS signal type: `modal app stop <name>` without affecting others.
 
-## v2.5 note
+## Hermes retirement (v2.5 Day 3)
 
-Remaining Hermes ingestion/detection skills migrate in v2.5 Days 2–3. Hermes skill tree is archived on Day 3 after all migrations land.
+- Repo: `agent/skills` → `agent/_archive/skills`; `tools/sync_skills.py` → `tools/_archive/sync_skills.py`
+- Operator: archive `~/.hermes/skills` if desired; keep `~/.hermes/.env`
+- Verify: `python -c "import sys; sys.argv=['hermes','cron','list']; from hermes_cli.main import main; main()"` → **empty**

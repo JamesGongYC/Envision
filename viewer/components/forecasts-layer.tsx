@@ -1,23 +1,13 @@
 'use client';
 
 import { GeoJSON, Popup, CircleMarker } from 'react-leaflet';
-import Link from 'next/link';
 import type { Forecast } from '@/lib/types';
+import { ForecastDropdown } from '@/components/forecast-dropdown';
 
 const CLASS_STYLES = {
   wildfire: { stroke: '#dc2626', fill: '#fca5a5' },
   typhoon: { stroke: '#2563eb', fill: '#93c5fd' },
 } as const;
-
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    timeZoneName: 'short',
-  });
-}
 
 function geometryCentroid(
   geom: GeoJSON.Geometry
@@ -47,53 +37,8 @@ function geometryCentroid(
   return [sumLat / ring.length, sumLon / ring.length];
 }
 
-/**
- * Active forecast polygons and centroid markers.
- * Day 2+: FIRMSHotspotsLayer, signal layers, etc.
- */
+/** Active forecast polygons and centroid markers (click → ForecastDropdown). */
 export function ForecastsLayer({ forecasts }: { forecasts: Forecast[] }) {
-  const renderPopup = (f: Forecast) => (
-    <Popup>
-      <div className="text-sm space-y-1.5 min-w-[220px]">
-        <div className="flex items-center justify-between gap-2">
-          <span
-            className={`inline-block px-1.5 py-0.5 rounded text-xs font-medium ${
-              f.disaster_class === 'wildfire'
-                ? 'bg-red-100 text-red-700'
-                : 'bg-blue-100 text-blue-700'
-            }`}
-          >
-            {f.disaster_class}
-          </span>
-          <span className="text-xs text-neutral-600">
-            {(f.probability * 100).toFixed(0)}% probability
-          </span>
-        </div>
-
-        <p className="text-xs text-neutral-700 leading-snug">{f.reasoning}</p>
-
-        <div className="text-[11px] text-neutral-500 pt-1.5 border-t border-neutral-200">
-          <div>
-            <span className="text-neutral-400">Skill:</span>{' '}
-            <code className="text-[10px]">{f.skill_id}</code> v
-            {f.skill_version}
-          </div>
-          <div>
-            <span className="text-neutral-400">Valid:</span>{' '}
-            {formatTime(f.valid_from)} → {formatTime(f.valid_until)}
-          </div>
-        </div>
-
-        <Link
-          href={`/forecast/${f.id}`}
-          className="inline-block text-xs text-blue-600 hover:underline pt-0.5"
-        >
-          Details →
-        </Link>
-      </div>
-    </Popup>
-  );
-
   return (
     <>
       {forecasts.map((f) => {
@@ -113,9 +58,12 @@ export function ForecastsLayer({ forecasts }: { forecasts: Forecast[] }) {
               weight: 1.5,
               opacity: 0.85,
             })}
-          >
-            {renderPopup(f)}
-          </GeoJSON>
+            eventHandlers={{
+              add: (e) => {
+                e.target.bringToFront();
+              },
+            }}
+          />
         );
       })}
 
@@ -135,8 +83,15 @@ export function ForecastsLayer({ forecasts }: { forecasts: Forecast[] }) {
               weight: 2.5,
               opacity: 1,
             }}
+            eventHandlers={{
+              add: (e) => {
+                e.target.bringToFront();
+              },
+            }}
           >
-            {renderPopup(f)}
+            <Popup>
+              <ForecastDropdown forecast={f} />
+            </Popup>
           </CircleMarker>
         );
       })}

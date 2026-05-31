@@ -14,8 +14,8 @@ Envision is an experimental research artifact built to explore self-evolving age
 
 ## What it does
 
-- Ingests open-data signals from NASA FIRMS (fires), NWS Alerts (fire weather), and NHC (tropical cyclones).
-- Runs four detection skills that convert raw signals into probabilistic forecasts.
+- Ingests open-data signals from NASA FIRMS, NWS, NHC, Open-Meteo, JTWC, ECMWF HRES/AIFS (via Modal).
+- Runs four detection skills on Modal that convert raw signals into probabilistic forecasts (LLM reasoning with templated fallback).
 - Evaluates forecasts against GDACS ground-truth events, scoring each with a Brier contribution.
 - A daily Curator skill reads 14-day Brier statistics and proposes parameter adjustments via Claude, gated behind a manual approval queue.
 - Publishes a public, read-only viewer with the live map, per-forecast detail pages, and an agent log.
@@ -31,42 +31,50 @@ See [`docs/METHODS.md`](docs/METHODS.md) for the architecture.
 
 ## Stack
 
-- **Agent runtime:** Hermes Agent (Nous Research, MIT)
-- **LLM:** Anthropic Claude Sonnet
+- **Agent runtime:** [Modal](https://modal.com/) scheduled functions (v2.5+)
+- **LLM:** Anthropic Claude Sonnet (detection reasoning + Curator)
 - **Database:** Neon Postgres + PostGIS
-- **Viewer:** Next.js 14 (App Router) on Vercel, Tailwind, Leaflet + CARTO tiles
-- **Cron:** Hermes-managed, mostly agent-mode
+- **Viewer:** Next.js (App Router) on Vercel, Tailwind, Leaflet + CARTO tiles
+- **Legacy:** Hermes Agent tree archived under `agent/_archive/skills/` (historical reference)
 
 ## Repository layout
 
 ```
 envision/
-├── agent/skills/           # source-of-truth copies of all skills
-│   ├── ingest/             # FIRMS, NWS, NHC
-│   ├── ground_truth/       # GDACS
-│   ├── detect/             # 4 detection skills
-│   ├── evaluate/           # forecast-evaluator
-│   └── curator/            # the self-evolving Curator
+├── agent/
+│   ├── lib/                # trace_builder, reasoning_llm, reasoning_prompts
+│   ├── modal_skills/       # all live skills (ingest, detect, evaluate, curator)
+│   └── _archive/skills/    # retired Hermes skill copies (v2.5 Day 3)
 ├── db/migrations/          # SQL migrations
 ├── docs/
 │   ├── METHODS.md          # full architecture explanation
 │   └── SAFETY.md           # kill switch contract, probability cap, etc.
 ├── tools/                  # operator CLIs
 │   ├── review_proposals.py # approval queue review tool
-│   └── check_status.py     # kill-switch state check
+│   ├── check_status.py     # kill-switch state check
+│   └── _archive/           # retired sync_skills.py
 ├── viewer/                 # Next.js viewer (deployed to Vercel)
 └── envision_plan.md        # original project plan
 ```
 
+## Operator setup
+
+1. Modal: `pip install modal` → `python -m modal setup`
+2. Secret `envision-neon` — see [`agent/modal_skills/README.md`](agent/modal_skills/README.md)
+3. Deploy skills: `python -m modal deploy agent/modal_skills/<skill>/app.py`
+4. Windows: `$env:PYTHONUTF8='1'` before `modal run` / `modal deploy`
+
+Hermes cron and `tools/sync_skills.py` are **retired** as of v2.5. Do not delete `~/.hermes/.env` (historical keys).
+
 ## Safety
 
-The Curator (the only LLM-driven mutating component) is gated by an environment variable:
+The Curator (the only LLM-driven mutating component) is gated by an environment variable on the Modal secret:
 
 ```sh
 ENVISION_CURATOR_ENABLED=false
 ```
 
-Set this in `~/.hermes/.env` to halt all mutation. See [`docs/SAFETY.md`](docs/SAFETY.md) for the full safety contract.
+See [`docs/SAFETY.md`](docs/SAFETY.md) for the full safety contract.
 
 Approval of Curator-proposed edits is manual via `tools/review_proposals.py`. Deployment of an approved edit is also manual — the CLI never overwrites skill files on disk.
 
@@ -76,4 +84,4 @@ MIT for code. Source data attribution belongs to each provider — see `/about` 
 
 ## Status
 
-One-week build. v1 ships with the cuts documented in [`envision_plan.md` §11](envision_plan.md). v2 work is documented in §15 of the same file.
+v2.5 complete in repo: all skills on Modal, polygon map layers, forecast dropdown with typing reasoning. Operator: Vercel deploy + git tag `v2.5.0`.
