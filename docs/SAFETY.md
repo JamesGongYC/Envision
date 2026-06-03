@@ -1,23 +1,24 @@
-# Envision — Safety controls (Day 4)
+# Envision — Safety controls
 
-## Kill switch — Curator mutation
+## Kill switch — evolution only
 
-The Curator (Day 6) MUST check this before proposing any skill edit.
+The Curator evolution pass MUST check `ENVISION_CURATOR_ENABLED` before mutating.
 
 | State | `ENVISION_CURATOR_ENABLED` value |
 |---|---|
-| Curator runs normally (default) | `true`, `1`, unset, or absent |
-| Curator halts all mutation | `false`, `0`, `no`, `off` |
+| Evolution runs normally (default) | `true`, `1`, unset, or absent |
+| Evolution halted | `false`, `0`, `no`, `off` |
 
 The kill switch does **not** stop:
-- Existing pending proposals from being reviewed
-- Detection skills from running
+- Existing pending/shadow proposals from being reviewed
+- Production detection skills from running
+- Shadow runner / evaluator (already-deployed candidates continue until promoted/discarded)
 - Ingestion skills from running
-- The evaluator from running
+- The public viewer
 
-To halt Curator mutation right now:
+To halt evolution:
 
-**Modal (production curator since v2 Day 4):**
+**Modal:**
 
 ```sh
 python -m modal secret create envision-neon \
@@ -26,61 +27,35 @@ python -m modal secret create envision-neon \
   ENVISION_CURATOR_ENABLED=false
 ```
 
-Include all keys — Modal replaces the entire secret.
+Verify: `python tools/check_status.py`
 
-**Legacy local env** (Hermes curator retired; kept for reference):
+## v3 evolution gates
 
-```sh
-echo 'ENVISION_CURATOR_ENABLED=false' >> ~/.hermes/.env
-```
+| Gate | What it blocks |
+|---|---|
+| AST + sandbox validation | Non-executable or persistence-laden mutants |
+| No-persistence check | Candidates that write forecasts/signals in skill code |
+| Cross-window selection | Candidates that beat parent in only some backtest windows |
+| Thin ground truth | Selector refuses when <3 scorable windows |
+| Shadow observation | Promotion eligibility requires ≥20 shadow evaluations |
+| Noise floor (0.03) | Shadow Brier must beat parent live 14d Brier by ≥0.03 |
+| Operator `promote` | No automatic path to production `run.py` |
+| Manual `modal deploy` | Even after promote, operator must deploy |
 
-To re-enable:
+**Tiered auto-approve** (auto-promote parametric edits below a threshold) is **explicitly deferred** — all production promotion is human-gated in v3.0.
 
-```sh
-# Modal: recreate envision-neon with ENVISION_CURATOR_ENABLED=true (or omit the key)
-python -m modal secret create envision-neon DATABASE_URL='...' ANTHROPIC_API_KEY='...' ENVISION_CURATOR_ENABLED=true
+## Per-skill disable
 
-# Legacy local env only:
-# Edit ~/.hermes/.env and set ENVISION_CURATOR_ENABLED=true (or remove the line)
-```
-
-Verify current state:
-
-```sh
-python tools/check_status.py
-```
-
-## Per-skill disable (no env var; do it via cron)
-
-If a single skill misfires:
-
-```sh
-hermes cron list                # find the offending job ID
-hermes cron remove <id>         # stop scheduling it
-```
-
-The skill files stay on disk, the table data stays untouched — only the
-scheduled execution is gone. Re-add with `hermes cron add` once fixed.
+Stop a single Modal detection app via the Modal dashboard (`modal app stop <name>`) or pause its cron schedule.
 
 ## Probability cap
 
-A CHECK constraint on `forecasts.probability` enforces `<= 0.85`. Already
-in place from migration 001. No detector code can write a higher value
-without raising a database error — verified Day 1.
+A CHECK constraint on `forecasts.probability` enforces `<= 0.85`.
 
 ## Approval queue
 
-Curator-proposed edits land in `skill_edit_proposals` with `status='pending'`.
-None auto-apply. The review tool (`tools/review_proposals.py`) is the only
-sanctioned path to promote a proposal; it marks the row approved but does
-not overwrite skill files — that step is manual on purpose.
+Mutator proposals land in `skill_edit_proposals` with linked `skill_lineage` rows. None auto-promote. `tools/review_proposals.py promote` is the only sanctioned path to production code; it writes `run.py` but does not deploy.
 
-## Probability + outcome → Brier signal
+## Brier signal
 
-The evaluator runs nightly. Every closed-out forecast gets one
-`evaluations` row whose `brier_contribution` is `(probability - outcome)²`.
-Mean Brier per `skill_id` is the gradient the Curator will follow.
-
-A skill that grows worse over time (mean Brier rising for a fixed
-`skill_version`) will not be auto-corrected — that's a Day 6 concern.
-For Day 4 the data just accumulates.
+The evaluator scores live `forecasts` and shadow `forecasts_shadow` separately. Mean Brier per skill drives worst-K targeting; shadow Brier drives promotion eligibility.

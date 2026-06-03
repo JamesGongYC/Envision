@@ -1,0 +1,184 @@
+"""Daily evolution pass: worst-K → mutate → select → shadow."""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+import psycopg
+from psycopg import Connection
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+AGENT_LIB = REPO_ROOT / "agent" / "lib"
+for p in (str(REPO_ROOT), str(AGENT_LIB)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from agent.evolution.budget import PASS_BUDGET_USD, BudgetTracker  # noqa: E402
+from agent.evolution.mutator import mutate_skill  # noqa: E402
+from agent.evolution.selector import select_candidates  # noqa: E402
+from agent.evolution.skill_loader import SKILL_FOLDERS  # noqa: E402
+from agent.lib.repo_env import load_repo_env  # noqa: E402
+
+SKILL_ID = "curator"
+WORST_K = 3
+MIN_EVALUATIONS_TO_CONSIDER = 5
+
+
+@dataclass
+class PassSummary:
+    targeted: list[str] = field(default_factory=list)
+    mutated: int = 0
+    accepted: int = 0
+    selected_to_shadow: list[str] = field(default_factory=list)
+    skipped: int = 0
+    budget: dict = field(default_factory=dict)
+    generator_note: str | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "targeted": self.targeted,
+            "mutated": self.mutated,
+            "accepted": self.accepted,
+            "selected_to_shadow": self.selected_to_shadow,
+            "skipped": self.skipped,
+            "budget": self.budget,
+            "generator_note": self.generator_note,
+        }
+
+
+def has_pending_proposal(db: Connection, skill_id: str) -> bool:
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM skill_edit_proposals
+            WHERE skill_id = %s AND status = 'pending'
+            LIMIT 1
+            """,
+            (skill_id,),
+        )
+        return cur.fetchone() is not None
+
+
+def pick_worst_k_skills(
+    db: Connection,
+    now: datetime,
+    k: int = WORST_K,
+) -> list[str]:
+    """Rank detection skills by 14d live Brier; tie-break by version spread."""
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              f.skill_id,
+              f.skill_version,
+              COUNT(*)::int AS n_evals,
+              AVG(e.brier_contribution)::float AS mean_brier
+            FROM evaluations e
+            JOIN forecasts f ON f.id = e.forecast_id
+            WHERE e.evaluated_at > %s - interval '14 days'
+              AND f.skill_id = ANY(%s)
+            GROUP BY f.skill_id, f.skill_version
+            """,
+            (now, list(SKILL_FOLDERS.keys())),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return []
+
+    by_skill: dict[str, list[tuple[int, int, float]]] = {}
+    for skill_id, version, n_evals, mean_brier in rows:
+        by_skill.setdefault(skill_id, []).append(
+            (int(version), int(n_evals), float(mean_brier))
+        )
+
+    ranked: list[tuple[float, float, str]] = []
+    for skill_id, versions in by_skill.items():
+        if has_pending_proposal(db, skill_id):
+            continue
+        current = max(versions, key=lambda x: x[0])
+        cur_ver, n_evals, cur_brier = current
+        if n_evals < MIN_EVALUATIONS_TO_CONSIDER:
+            continue
+        hist_briers = [b for v, n, b in versions if v != cur_ver and n >= 1]
+        min_hist = min(hist_briers) if hist_briers else cur_brier
+        spread = cur_brier - min_hist
+        ranked.append((cur_brier, spread, skill_id))
+
+    ranked.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [skill_id for _, _, skill_id in ranked[:k]]
+
+
+def run_evolution_pass(
+    db: Connection,
+    now: datetime,
+    *,
+    budget: BudgetTracker | None = None,
+) -> PassSummary:
+    summary = PassSummary()
+    tracker = budget or BudgetTracker()
+
+    if now.weekday() == 0:
+        summary.generator_note = "generator deferred to v3.1"
+        print(f"[{SKILL_ID}] {summary.generator_note}")
+
+    targets = pick_worst_k_skills(db, now, WORST_K)
+    summary.targeted = targets
+
+    if not targets:
+        print(f"[{SKILL_ID}] no skills targeted for mutation")
+        summary.budget = tracker.summary()
+        return summary
+
+    print(f"[{SKILL_ID}] targeting worst-K: {targets}")
+
+    for skill_id in targets:
+        if not tracker.can_afford_next_call():
+            print(f"[{SKILL_ID}] budget exhausted; stopping before {skill_id}")
+            summary.skipped += 1
+            break
+        summary.mutated += 1
+        print(f"[{SKILL_ID}] mutating {skill_id}...")
+        result = mutate_skill(skill_id, db, now=now, budget=tracker)
+        if result.accepted:
+            summary.accepted += 1
+            print(
+                f"[{SKILL_ID}] {skill_id}: accepted "
+                f"proposal={result.proposal_id[:8] if result.proposal_id else '?'}"
+            )
+        else:
+            print(
+                f"[{SKILL_ID}] {skill_id}: rejected — {result.rejection_reasons}"
+            )
+
+    sel = select_candidates(db, dry_run=False)
+    summary.selected_to_shadow = sel.selected_lineage_ids
+    summary.budget = tracker.summary()
+
+    print(
+        f"[{SKILL_ID}] pass complete: targeted={len(summary.targeted)} "
+        f"mutated={summary.mutated} accepted={summary.accepted} "
+        f"shadow={len(summary.selected_to_shadow)} "
+        f"spend=${summary.budget.get('spend_usd', 0):.2f}/{PASS_BUDGET_USD}"
+    )
+    return summary
+
+
+def main() -> int:
+    load_repo_env()
+    now = datetime.now(timezone.utc)
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        print("DATABASE_URL required", file=sys.stderr)
+        return 2
+    with psycopg.connect(url, autocommit=False) as db:
+        run_evolution_pass(db, now)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

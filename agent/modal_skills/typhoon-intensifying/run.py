@@ -38,14 +38,15 @@ for _lib in ("/root/agent_lib", Path(__file__).resolve().parents[2] / "lib"):
 from trace_builder import TraceBuilder  # noqa: E402
 from reasoning_llm import generate_reasoning  # noqa: E402
 from reasoning_prompts import prompt_typhoon_intensifying  # noqa: E402
+from forecast_model import Forecast  # noqa: E402
 
 # --- config ---------------------------------------------------------------
 SKILL_ID = "typhoon_intensifying"
 SKILL_VERSION = 1
 
-LOOKBACK_HOURS = 24
 WINDOW_HOURS = 12           # compare current vs ~12h earlier bulletin
 WINDOW_TOLERANCE_HOURS = 2  # earlier bulletin must fall in [10h, 14h] ago
+LOOKBACK_HOURS = WINDOW_HOURS + WINDOW_TOLERANCE_HOURS  # 14h SQL lookback
 PRESSURE_DROP_THRESHOLD = 5.0  # hPa
 BUFFER_DEG = 1.8            # ~200 km at equator; coarse but OK for v1
 FORECAST_VALID_HOURS = 48   # within plan's 6–72h short-range envelope
@@ -235,46 +236,21 @@ def build_reasoning(name: str, classification: str,
     )
 
 
-# --- write ---------------------------------------------------------------
-def insert_forecast(conn: Connection, forecast: dict) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO forecasts (
-              id, issued_at, valid_from, valid_until,
-              disaster_class, geometry, probability,
-              skill_id, skill_version, contributing_signal_ids,
-              reasoning, is_baseline, trace
-            ) VALUES (
-              %(id)s, %(issued_at)s, %(valid_from)s, %(valid_until)s,
-              %(disaster_class)s,
-              ST_Force2D(ST_SetSRID(ST_GeomFromGeoJSON(%(geometry)s), 4326)),
-              %(probability)s,
-              %(skill_id)s, %(skill_version)s,
-              %(contributing_signal_ids)s::uuid[],
-              %(reasoning)s, %(is_baseline)s,
-              %(trace)s::jsonb
-            )
-            """,
-            forecast,
-        )
-
-
 # --- run -----------------------------------------------------------------
-def run(now: datetime, db: Connection) -> int:
+def run(now: datetime, db: Connection) -> list[Forecast]:
     valid_until = now + timedelta(hours=FORECAST_VALID_HOURS)
 
     rows = load_recent_advisories(db, now)
     if not rows:
         print(f"[{SKILL_ID}] no NHC advisories in last "
               f"{LOOKBACK_HOURS}h (likely off-season).")
-        return 0
+        return []
 
     storms = group_by_storm(rows)
     if not storms:
         print(f"[{SKILL_ID}] advisories present but no usable "
               f"pressure/id fields — check payload structure.")
-        return 0
+        return []
 
     print(f"[{SKILL_ID}] tracking {len(storms)} storm(s) "
           f"across {len(rows)} advisor{'y' if len(rows)==1 else 'ies'}.")
@@ -294,7 +270,7 @@ def run(now: datetime, db: Connection) -> int:
             "timestamps": [b[1].isoformat() for b in bulletins],
         })
 
-    written = 0
+    out: list[Forecast] = []
     for skey, bulletins in storms.items():
         result = find_intensification(bulletins, now)
         if result is None:
@@ -351,41 +327,25 @@ def run(now: datetime, db: Connection) -> int:
         )
         reasoning = generate_reasoning(prompt, fallback)
 
-        forecast = {
-            "id": str(uuid.uuid4()),
-            "issued_at": now,
-            "valid_from": now,
-            "valid_until": valid_until,
-            "disaster_class": "typhoon",
-            "geometry": json.dumps(geom_geojson),
-            "probability": prob,
-            "skill_id": SKILL_ID,
-            "skill_version": SKILL_VERSION,
-            "contributing_signal_ids": [str(sig_id_then), str(sig_id_now)],
-            "reasoning": reasoning,
-            "is_baseline": False,
-            "trace": json.dumps(trace_dict),
-        }
-        insert_forecast(db, forecast)
-        written += 1
+        out.append(
+            Forecast(
+                id=str(uuid.uuid4()),
+                issued_at=now,
+                valid_from=now,
+                valid_until=valid_until,
+                disaster_class="typhoon",
+                geometry=json.dumps(geom_geojson),
+                probability=prob,
+                skill_id=SKILL_ID,
+                skill_version=SKILL_VERSION,
+                contributing_signal_ids=[str(sig_id_then), str(sig_id_now)],
+                reasoning=reasoning,
+                is_baseline=False,
+                trace=trace_dict,
+            )
+        )
         print(f"[{SKILL_ID}]   {name}: {p_then:.0f}→{p_now:.0f} hPa "
               f"over {elapsed_h:.1f}h (Δ={delta:.1f}) p={prob}")
 
-    db.commit()
-    print(f"[{SKILL_ID}] wrote {written} forecasts.")
-    return written
-
-
-def main() -> int:
-    now = parse_now()
-    with psycopg.connect(DATABASE_URL, autocommit=False) as db:
-        run(now, db)
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception as e:  # noqa: BLE001
-        print(f"[{SKILL_ID}] ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+    print(f"[{SKILL_ID}] emitted {len(out)} forecast(s).")
+    return out

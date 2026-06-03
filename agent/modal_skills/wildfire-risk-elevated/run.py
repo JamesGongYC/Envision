@@ -34,6 +34,11 @@ for _lib in ("/root/agent_lib", Path(__file__).resolve().parents[2] / "lib"):
 from trace_builder import TraceBuilder  # noqa: E402
 from reasoning_llm import generate_reasoning  # noqa: E402
 from reasoning_prompts import prompt_wildfire_risk_elevated  # noqa: E402
+from forecast_model import Forecast  # noqa: E402
+from signal_temporal import (  # noqa: E402
+    nws_fire_warning_active_sql,
+    trailing_timestamp_sql,
+)
 
 # --- config ---------------------------------------------------------------
 SKILL_ID = "wildfire_risk_elevated"
@@ -84,9 +89,11 @@ def load_recent_hotspots(conn: Connection, now: datetime) -> list[tuple]:
 
 def count_fire_polygons(conn: Connection, now: datetime) -> tuple[int, int]:
     """Return (nws_fire_warning_count, grid_polygon_count)."""
+    ts_win = trailing_timestamp_sql(LOOKBACK_HOURS)
+    nws_active = nws_fire_warning_active_sql()
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT
               COUNT(*) FILTER (
                 WHERE signal_type = 'fire_warning' AND source = 'nws_alerts'
@@ -98,11 +105,11 @@ def count_fire_polygons(conn: Connection, now: datetime) -> tuple[int, int]:
             FROM signals
             WHERE signal_type IN ('fire_warning', 'fire_weather_grid')
               AND source IN ('nws_alerts', 'ecmwf_open_data', 'aifs')
-              AND ingested_at > %s - interval '24 hours'
-              AND timestamp <= %s
+              AND {ts_win}
+              AND {nws_active}
               AND geometry IS NOT NULL
             """,
-            (now, now),
+            (now, now, now, now),
         )
         row = cur.fetchone()
         return (row[0] or 0, row[1] or 0)
@@ -112,22 +119,24 @@ def polygons_intersecting(
     conn: Connection, cluster_geom_geojson: dict, now: datetime
 ) -> list[tuple]:
     """Return [(id, payload, source, signal_type)] intersecting cluster."""
+    ts_win = trailing_timestamp_sql(LOOKBACK_HOURS)
+    nws_active = nws_fire_warning_active_sql()
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT id, payload, source, signal_type
             FROM signals
             WHERE signal_type IN ('fire_warning', 'fire_weather_grid')
               AND source IN ('nws_alerts', 'ecmwf_open_data', 'aifs')
-              AND ingested_at > %s - interval '24 hours'
-              AND timestamp <= %s
+              AND {ts_win}
+              AND {nws_active}
               AND geometry IS NOT NULL
               AND ST_Intersects(
                 geometry,
                 ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)
               )
             """,
-            (now, now, json.dumps(cluster_geom_geojson)),
+            (now, now, now, now, json.dumps(cluster_geom_geojson)),
         )
         return cur.fetchall()
 
@@ -228,46 +237,21 @@ def build_reasoning(
     )
 
 
-# --- write ----------------------------------------------------------------
-def insert_forecast(conn: Connection, forecast: dict) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO forecasts (
-              id, issued_at, valid_from, valid_until,
-              disaster_class, geometry, probability,
-              skill_id, skill_version, contributing_signal_ids,
-              reasoning, is_baseline, trace
-            ) VALUES (
-              %(id)s, %(issued_at)s, %(valid_from)s, %(valid_until)s,
-              %(disaster_class)s,
-              ST_Force2D(ST_SetSRID(ST_GeomFromGeoJSON(%(geometry)s), 4326)),
-              %(probability)s,
-              %(skill_id)s, %(skill_version)s,
-              %(contributing_signal_ids)s::uuid[],
-              %(reasoning)s, %(is_baseline)s,
-              %(trace)s::jsonb
-            )
-            """,
-            forecast,
-        )
-
-
 # --- run ------------------------------------------------------------------
-def run(now: datetime, db: Connection) -> int:
+def run(now: datetime, db: Connection) -> list[Forecast]:
     valid_until = now + timedelta(hours=FORECAST_VALID_HOURS)
 
     hotspots = load_recent_hotspots(db, now)
     if len(hotspots) < MIN_SAMPLES:
         print(f"[{SKILL_ID}] only {len(hotspots)} hotspots in last "
               f"{LOOKBACK_HOURS}h; skipping.")
-        return 0
+        return []
 
     clusters = cluster_hotspots(hotspots)
     print(f"[{SKILL_ID}] {len(hotspots)} hotspots → {len(clusters)} clusters.")
     polygon_count_nws, polygon_count_ecmwf = count_fire_polygons(db, now)
 
-    written = 0
+    out: list[Forecast] = []
     selected_clusters = []
     cluster_bboxes: list[list[float]] = []
     for label, points in clusters:
@@ -307,10 +291,13 @@ def run(now: datetime, db: Connection) -> int:
 
         sc = selected_clusters[-1]
         tb = TraceBuilder(now, SKILL_ID)
+        window_start = now - timedelta(hours=LOOKBACK_HOURS)
         tb.set_inputs(
             hotspot_count=len(hotspots),
             polygon_count_nws=polygon_count_nws,
             polygon_count_ecmwf=polygon_count_ecmwf,
+            window_start=window_start.isoformat(),
+            window_end=now.isoformat(),
         )
         tb.set_intermediate(
             clusters_found=len(clusters),
@@ -342,41 +329,25 @@ def run(now: datetime, db: Connection) -> int:
         )
         reasoning = generate_reasoning(prompt, fallback)
 
-        forecast = {
-            "id": str(uuid.uuid4()),
-            "issued_at": now,
-            "valid_from": now,
-            "valid_until": valid_until,
-            "disaster_class": "wildfire",
-            "geometry": json.dumps(geom_geojson),
-            "probability": prob,
-            "skill_id": SKILL_ID,
-            "skill_version": SKILL_VERSION,
-            "contributing_signal_ids": contributing,
-            "reasoning": reasoning,
-            "is_baseline": False,
-            "trace": json.dumps(trace_dict),
-        }
-        insert_forecast(db, forecast)
-        written += 1
+        out.append(
+            Forecast(
+                id=str(uuid.uuid4()),
+                issued_at=now,
+                valid_from=now,
+                valid_until=valid_until,
+                disaster_class="wildfire",
+                geometry=json.dumps(geom_geojson),
+                probability=prob,
+                skill_id=SKILL_ID,
+                skill_version=SKILL_VERSION,
+                contributing_signal_ids=contributing,
+                reasoning=reasoning,
+                is_baseline=False,
+                trace=trace_dict,
+            )
+        )
         print(f"[{SKILL_ID}]   cluster#{label}: "
               f"n={len(points)} p={prob} alerts={len(matches)}")
 
-    db.commit()
-    print(f"[{SKILL_ID}] wrote {written} forecasts.")
-    return written
-
-
-def main() -> int:
-    now = parse_now()
-    with psycopg.connect(DATABASE_URL, autocommit=False) as db:
-        run(now, db)
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception as e:  # noqa: BLE001
-        print(f"[{SKILL_ID}] ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+    print(f"[{SKILL_ID}] emitted {len(out)} forecast(s).")
+    return out

@@ -191,6 +191,11 @@ class CuratorTraceBuilder:
         self._llm_hash: str | None = None
         self._llm_response: str | None = None
         self._rejection_reasons: list[str] = []
+        self._rationale: str | None = None
+        self._validation_stages: list[dict[str, Any]] = []
+        self._mutation_targets: list[str] = []
+        self._llm_model: str | None = None
+        self._mutation_attempts: list[dict[str, Any]] = []
 
     def set_brier_stats(self, stats: dict[str, Any]) -> None:
         self._brier_stats = stats
@@ -217,12 +222,46 @@ class CuratorTraceBuilder:
     def add_rejection_reason(self, reason: str) -> None:
         self._rejection_reasons.append(reason)
 
+    def set_rationale(self, rationale: str) -> None:
+        self._rationale = rationale
+
+    def set_mutation_targets(self, targets: list[str]) -> None:
+        self._mutation_targets = list(targets)
+
+    def set_llm_model(self, model: str) -> None:
+        self._llm_model = model
+
+    def set_validation_stages(self, stages: list[dict[str, Any]]) -> None:
+        self._validation_stages = list(stages)
+
+    def set_mutation_attempts(self, attempts: list[dict[str, Any]]) -> None:
+        self._mutation_attempts = list(attempts)
+
+    def add_validation_stage(
+        self, stage: str, *, passed: bool, detail: str = ""
+    ) -> None:
+        self._validation_stages.append({
+            "stage": stage,
+            "passed": passed,
+            "detail": detail,
+        })
+
     def build(self) -> dict:
         trace: dict[str, Any] = {
             "brier_stats_observed": _json_safe(self._brier_stats),
             "ast_validation": _json_safe(self._ast_validation),
             "rejection_reasons": _json_safe(self._rejection_reasons),
         }
+        if self._rationale is not None:
+            trace["rationale"] = self._rationale
+        if self._validation_stages:
+            trace["validation_stages"] = _json_safe(self._validation_stages)
+        if self._mutation_attempts:
+            trace["attempts"] = _json_safe(self._mutation_attempts)
+        if self._mutation_targets:
+            trace["mutation_targets"] = _json_safe(self._mutation_targets)
+        if self._llm_model is not None:
+            trace["llm_model"] = self._llm_model
         if self._llm_hash is not None:
             trace["llm_input_prompt_hash"] = self._llm_hash
         if self._llm_response is not None:

@@ -85,7 +85,7 @@ Note: AIFS Open Data does not expose `vo` at 850 hPa directly; cyclone vorticity
 
 ## 3. Detection
 
-Four Modal detection apps (`agent/modal_skills/`) convert raw signals into probabilistic forecasts. Each writes one or more `forecasts` rows per cycle, with `probability` capped at 0.85 by a database `CHECK` constraint.
+Four Modal detection apps (`agent/modal_skills/`) convert raw signals into probabilistic forecasts. Each exposes **`run(now, db) -> list[Forecast]`** (pure detection); persistence is **`emit_forecasts()`** in [`agent/lib/forecast_writer.py`](../agent/lib/forecast_writer.py) (not mutation surface — v2 §12). Each writes one or more `forecasts` rows per cycle, with `probability` capped at 0.85 by a database `CHECK` constraint.
 
 | Skill | Logic |
 |---|---|
@@ -127,36 +127,57 @@ Detection skills write structured **`forecasts.trace`** JSONB on every new forec
 
 Modal detection and curator apps mount `agent/lib/` at `/root/agent_lib` on the container image.
 
-## 5. Curation
+## 5. Evolution loop (v3)
 
-Once daily, the Curator skill reads 14-day Brier statistics per detection skill and proposes parameter adjustments via Claude (`claude-sonnet-4-6`).
+Once daily (04:00 UTC), the Curator orchestrates the **automatic** half of the evolution loop. The **operator** half is manual via `tools/review_proposals.py`.
 
-**Runtime:** Curator runs on **Modal** (`agent/modal_skills/curator/`), scheduled 04:00 UTC. Detection skills are separate Modal apps; Hermes runtime retired v2.5.
+**Automatic path** (halted by `ENVISION_CURATOR_ENABLED=false`):
 
-**Scope is enforced by prompt, not by sandbox.** The Curator is told it may only change numeric constants and templated reasoning strings — not function signatures, control flow, imports, SQL, or schema. The output is validated for Python syntax but not for semantic safety. Human review at promotion time is the real safety bar.
+1. **Pick worst-K** (K=3) detection skills by 14-day live Brier; tie-break by version spread.
+2. **Mutate** — Sonnet/Haiku rewrites the skill surface; seven-stage validation (AST, signature lock, no-persistence, signal catalog, import allowlist, sandbox).
+3. **Select** — cross-window backtest on ≥3 disjoint GT windows; candidate must beat parent by ≥0.03 Brier in **every** window; top-3 advance to `status='shadow'`.
+4. **Shadow run** — generic shadow-runner cron executes candidates into `forecasts_shadow` (public map never sees these).
+5. **Shadow evaluate** — forecast-evaluator writes `shadow_evaluations`.
 
-Every proposal lands in `skill_edit_proposals` with `status='pending'` and a populated `curator_trace` (Brier stats observed, AST validation, prompt hash, LLM response text). The Curator never writes to skill files on disk.
+**Gates on the automatic path:** kill switch; validation pipeline; cross-window selection; shadow rate limit (50/tick); $5/pass LLM budget (Sonnet→Haiku fallback, then stop).
+
+**Human path** (never automated):
+
+```
+tools/review_proposals.py list / show
+        │
+        ▼
+tools/review_proposals.py promote   ← requires shadow n≥20 + Brier beat parent
+        │
+        ▼
+operator: python -m modal deploy agent/modal_skills/<skill>/app.py
+```
+
+`promote` writes `agent/modal_skills/<skill>/run.py` and updates DB lineage — but **does not** run Modal deploy. No evolution cron writes production files.
+
+**Deferred:** de-novo generator (v3.1), diversity penalty in selector, tiered auto-approve for parametric edits.
+
+Implementation: [`agent/evolution/orchestrator.py`](../agent/evolution/orchestrator.py), [`agent/modal_skills/curator/run.py`](../agent/modal_skills/curator/run.py). v2 param-tweak curator archived at `_archived_v2_param_tweak.py`.
 
 ## 6. Approval workflow
 
 ```
-curator → skill_edit_proposals (status='pending')
+curator → mutate → validate → select → shadow (forecasts_shadow)
                 │
                 ▼
-       tools/review_proposals.py list
+       tools/review_proposals.py list    ← blocked_on reasons visible
                 │
                 ▼
-       tools/review_proposals.py show <id>     ← human reads the diff
+       tools/review_proposals.py show <id>   ← diff + backtest + shadow metrics
                 │
                 ▼
-       tools/review_proposals.py approve <id>  ← row marked approved
+       tools/review_proposals.py promote <id>   ← human gate; writes run.py
                 │
                 ▼
-       operator manually copies the proposed_code into the live
-       skill file, increments the version, restarts cron.
+       operator: modal deploy (manual)
 ```
 
-The `approve` command does not overwrite files. This is intentional. The CLI marks the row's status and prints the deployment path; the operator does the file replacement manually. Rollback is also manual: revert the script, decrement the version.
+`discard` archives rejected candidates. `approve`/`reject` are deprecated aliases for `promote`/`discard`.
 
 ## 7. Probability cap
 

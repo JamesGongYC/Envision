@@ -67,6 +67,16 @@ export default function AboutPage() {
         </li>
       </ul>
 
+      <h2 className="mt-10 text-xl font-semibold">Self-evolution (v3)</h2>
+      <p className="mt-3 text-neutral-700 text-sm leading-relaxed">
+        Envision can propose and test changes to its own detection code.
+        A change reaches the public map only after automated backtesting, a
+        live shadow trial (invisible to this site), and explicit human
+        approval. Self-evolution makes the experimental disclaimer above
+        more important, not less — treat every forecast as unvalidated
+        research output.
+      </p>
+
       <h2 className="mt-10 text-xl font-semibold">Data sources</h2>
       <ul className="mt-3 list-disc pl-6 text-neutral-700 space-y-1">
         <li>

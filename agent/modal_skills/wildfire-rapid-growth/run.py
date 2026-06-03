@@ -40,12 +40,15 @@ for _lib in ("/root/agent_lib", Path(__file__).resolve().parents[2] / "lib"):
 from trace_builder import TraceBuilder  # noqa: E402
 from reasoning_llm import generate_reasoning  # noqa: E402
 from reasoning_prompts import prompt_wildfire_rapid_growth  # noqa: E402
+from forecast_model import Forecast  # noqa: E402
 
 # --- config ---------------------------------------------------------------
 SKILL_ID = "wildfire_rapid_growth"
 SKILL_VERSION = 1
 
-LOOKBACK_HOURS = 72
+# Max signal consumption: 72h outer window for 3×24h day-over-day buckets (not 48h)
+SKILL_LOOKBACK_HOURS = 72
+LOOKBACK_HOURS = SKILL_LOOKBACK_HOURS
 CELL_SIZE_M = 50_000  # 50 km in EPSG:3857
 GROWTH_THRESHOLD = 1.5  # 50% growth
 FORECAST_VALID_HOURS = 24  # 0–24h nowcast
@@ -184,33 +187,8 @@ def build_reasoning(day_t, day_t1, day_t2, centroid_lonlat) -> str:
     )
 
 
-# --- write ---------------------------------------------------------------
-def insert_forecast(conn: Connection, forecast: dict) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO forecasts (
-              id, issued_at, valid_from, valid_until,
-              disaster_class, geometry, probability,
-              skill_id, skill_version, contributing_signal_ids,
-              reasoning, is_baseline, trace
-            ) VALUES (
-              %(id)s, %(issued_at)s, %(valid_from)s, %(valid_until)s,
-              %(disaster_class)s,
-              ST_Force2D(ST_SetSRID(ST_GeomFromGeoJSON(%(geometry)s), 4326)),
-              %(probability)s,
-              %(skill_id)s, %(skill_version)s,
-              %(contributing_signal_ids)s::uuid[],
-              %(reasoning)s, %(is_baseline)s,
-              %(trace)s::jsonb
-            )
-            """,
-            forecast,
-        )
-
-
 # --- run -----------------------------------------------------------------
-def run(now: datetime, db: Connection) -> int:
+def run(now: datetime, db: Connection) -> list[Forecast]:
     valid_until = now + timedelta(hours=FORECAST_VALID_HOURS)
 
     with db.cursor() as cur:
@@ -223,7 +201,7 @@ def run(now: datetime, db: Connection) -> int:
     if not rows:
         print(f"[{SKILL_ID}] no cells matched growth rule "
               f"(need ≥3 days of FIRMS history with sustained growth).")
-        return 0
+        return []
 
     print(f"[{SKILL_ID}] {len(rows)} growing cell(s) detected.")
 
@@ -237,7 +215,7 @@ def run(now: datetime, db: Connection) -> int:
             "days_consecutive": 2,
         })
 
-    written = 0
+    out: list[Forecast] = []
     for idx, (day_t, day_t1, day_t2, recent_ids, cell_geom) in enumerate(rows):
         geom_shape = shape(cell_geom)
         centroid = geom_shape.centroid
@@ -270,41 +248,25 @@ def run(now: datetime, db: Connection) -> int:
         )
         reasoning = generate_reasoning(prompt, fallback)
 
-        forecast = {
-            "id": str(uuid.uuid4()),
-            "issued_at": now,
-            "valid_from": now,
-            "valid_until": valid_until,
-            "disaster_class": "wildfire",
-            "geometry": json.dumps(cell_geom),
-            "probability": prob,
-            "skill_id": SKILL_ID,
-            "skill_version": SKILL_VERSION,
-            "contributing_signal_ids": contributing,
-            "reasoning": reasoning,
-            "is_baseline": False,
-            "trace": json.dumps(trace_dict),
-        }
-        insert_forecast(db, forecast)
-        written += 1
+        out.append(
+            Forecast(
+                id=str(uuid.uuid4()),
+                issued_at=now,
+                valid_from=now,
+                valid_until=valid_until,
+                disaster_class="wildfire",
+                geometry=json.dumps(cell_geom),
+                probability=prob,
+                skill_id=SKILL_ID,
+                skill_version=SKILL_VERSION,
+                contributing_signal_ids=contributing,
+                reasoning=reasoning,
+                is_baseline=False,
+                trace=trace_dict,
+            )
+        )
         print(f"[{SKILL_ID}]   cell @ ({centroid.y:.2f}, {centroid.x:.2f}): "
               f"{day_t2}→{day_t1}→{day_t} p={prob}")
 
-    db.commit()
-    print(f"[{SKILL_ID}] wrote {written} forecasts.")
-    return written
-
-
-def main() -> int:
-    now = parse_now()
-    with psycopg.connect(DATABASE_URL, autocommit=False) as db:
-        run(now, db)
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception as e:  # noqa: BLE001
-        print(f"[{SKILL_ID}] ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+    print(f"[{SKILL_ID}] emitted {len(out)} forecast(s).")
+    return out

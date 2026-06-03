@@ -1,1 +1,8 @@
 tools/seed_demo_data.py
+.env
+.env.local
+*.pyc
+__pycache__/
+.venv/
+venv/
+

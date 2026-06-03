@@ -11,9 +11,18 @@ import sys
 DEFAULT_MODEL = os.environ.get("ENVISION_REASONING_MODEL", "claude-sonnet-4-20250514")
 MAX_TOKENS = 200
 
+_BACKTEST_ENV = "ENVISION_BACKTEST"
+
+
+def _in_backtest() -> bool:
+    return os.environ.get(_BACKTEST_ENV, "").lower() in ("1", "true", "yes")
+
 
 def generate_reasoning(prompt: str, fallback: str) -> str:
     """Call Sonnet for operator-facing reasoning; never raise."""
+    if _in_backtest():
+        return fallback
+
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         print("[reasoning_llm] ANTHROPIC_API_KEY not set; using fallback.", file=sys.stderr)
@@ -40,5 +49,6 @@ def generate_reasoning(prompt: str, fallback: str) -> str:
             text = text[:397] + "..."
         return text
     except Exception as e:  # noqa: BLE001
-        print(f"[reasoning_llm] API error: {e}; using fallback.", file=sys.stderr)
+        if "LLM blocked in backtest" not in str(e):
+            print(f"[reasoning_llm] API error: {e}; using fallback.", file=sys.stderr)
         return fallback

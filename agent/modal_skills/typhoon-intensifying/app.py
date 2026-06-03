@@ -44,11 +44,14 @@ def detect_cycle() -> int:
     sys.path.insert(0, "/root/agent_lib")
     import psycopg
 
+    from forecast_writer import emit_forecasts
     from run import run
 
     now = datetime.now(timezone.utc)
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=False) as conn:
-        return run(now, conn)
+        n = emit_forecasts(run(now, conn), conn)
+        conn.commit()
+        return n
 
 
 @app.local_entrypoint()

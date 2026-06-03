@@ -496,3 +496,186 @@ All 12+ core Modal apps (ingest, detect, evaluate, housekeeping, GDACS, curator)
 **Build:** `cd viewer && npm run build` — verify locally.
 
 **Operator:** Vercel deploy; visual smoke — FIRMS dots, global polygon tint, wind particles when toggled.
+
+---
+
+## v3 Day 1 — Migration 006 + backtest harness
+
+**Date:** 2026-05-30
+
+### Schema
+
+- [`db/migrations/006_evolution.sql`](../db/migrations/006_evolution.sql) — `skill_lineage`, `backtest_run`, `forecasts_shadow`, `skill_edit_proposals.lineage_id`
+- [`db/schemas.py`](../db/schemas.py) / [`agent/lib/forecast_model.py`](../agent/lib/forecast_model.py) — `Forecast`, `SkillLineage`, `BacktestRun`, `ShadowForecast`
+
+**Operator:** Apply `006_evolution.sql` in Neon before `backfill_lineage` or harness.
+
+### Refactor
+
+- [`agent/lib/forecast_writer.py`](../agent/lib/forecast_writer.py) — `emit_forecasts()` for `forecasts` / `forecasts_shadow`
+- Four detectors: pure `run(now, db) -> list[Forecast]`; Modal `app.py` → `emit_forecasts(run(...), conn)`
+- [`agent/lib/scoring.py`](../agent/lib/scoring.py) — shared match + Brier; [`forecast-evaluator/run.py`](../agent/modal_skills/forecast-evaluator/run.py) imports it
+
+### Evolution package
+
+- [`agent/evolution/backtest_harness.py`](../agent/evolution/backtest_harness.py) — replay by cadence, no live INSERTs, leakage audit, LLM bypass
+- [`agent/evolution/backtest_connection.py`](../agent/evolution/backtest_connection.py) — `BacktestConnection` proxy enforces `SKILL_LOOKBACK` on all `signals` SELECTs
+- [`agent/lib/signal_temporal.py`](../agent/lib/signal_temporal.py) — trailing window + NWS active-as-of-`t` SQL helpers
+- [`agent/evolution/backfill_lineage.py`](../agent/evolution/backfill_lineage.py) — manual lineage for 4 skills
+- [`agent/evolution/test_backtest_sanity.py`](../agent/evolution/test_backtest_sanity.py) — trailing 7d, all 4 detection skills vs live evaluations (±0.02; UNVERIFIED if &lt;10 evals)
+- [`tools/compare_detection_emission.py`](../tools/compare_detection_emission.py), [`tools/compare_evaluator_output.py`](../tools/compare_evaluator_output.py)
+
+### v3 backtest window fix (2026-05-30)
+
+**Ticket:** [`docs/v3_fix_backtest_window.md`](v3_fix_backtest_window.md)
+
+- `wildfire-risk-elevated`: polygon queries use `timestamp` lookback (not `ingested_at`); NWS `effective`/`expires` as-of-`t`
+- `typhoon-intensifying`: SQL lookback 14h (12h window + 2h tolerance)
+- Harness: full-window guard via `BacktestConnection` (past + future edge)
+
+**Deploy gate:** Do **not** `modal deploy` refactored detection skills until `test_backtest_sanity.py` PASS for all verifiable skills.
+
+**Run sanity (local):**
+
+```bash
+python agent/evolution/backfill_lineage.py
+python agent/evolution/test_backtest_sanity.py
+```
+
+---
+
+## v3 Day 2 — Mutator + validation pipeline
+
+**Date:** 2026-06-01
+
+### Schema
+
+- [`db/migrations/007_lineage_candidates.sql`](../db/migrations/007_lineage_candidates.sql) — nullable `version`, `status` lifecycle, partial unique on promoted rows
+
+**Operator:** Apply after 006:
+
+```bash
+psql $DATABASE_URL -f db/migrations/007_lineage_candidates.sql
+```
+
+### Code
+
+- [`agent/evolution/mutator.py`](../agent/evolution/mutator.py) — `mutate_skill()` → Sonnet/Haiku `propose_skill_mutation`, persist proposal + candidate lineage
+- [`agent/evolution/skill_validator.py`](../agent/evolution/skill_validator.py) — 7-stage validation (AST → sandbox via `BacktestConnection`)
+- [`agent/evolution/test_mutator.py`](../agent/evolution/test_mutator.py) — unit + integration tests; live mutate skipped without `ANTHROPIC_API_KEY`
+
+**Run:**
+
+```bash
+python agent/evolution/test_mutator.py
+python agent/evolution/mutator.py --skill-id wildfire_risk_elevated
+python tools/review_proposals.py list
+```
+
+**Out of scope this ticket:** backtest scoring/selection (Day 4), shadow deploy (Day 3), auto-promotion.
+
+---
+
+## v3 — Mutator acceptance path
+
+**Date:** 2026-06-01 · Ticket: [`docs/v3_fix_mutator_acceptance.md`](v3_fix_mutator_acceptance.md)
+
+### Changes
+
+- [`agent/evolution/skill_surface.py`](../agent/evolution/skill_surface.py) — `extract_mutation_surface()`, `assert_parent_surface_clean()` (validator check #4 on parent before LLM)
+- [`agent/evolution/mutator.py`](../agent/evolution/mutator.py) — surface-only parent from disk/lineage; positive `return list[Forecast]` contract; `MAX_ATTEMPTS=3` retry with feedback; `attempts` in `curator_trace`; injectable `llm_fn`
+- Detection `run.py` files — persistence/CLI removed (entrypoint stays in `app.py` via `emit_forecasts(run(...))`)
+- [`agent/evolution/backfill_lineage.py`](../agent/evolution/backfill_lineage.py) — stores surface-only in `skill_lineage.source_code`
+- [`agent/evolution/test_mutator.py`](../agent/evolution/test_mutator.py) — stubbed happy path, retry, give-up, parent guard; `test_mutate_wildfire_live` smoke (warn + skip on reject)
+
+**Run (no network for happy path):**
+
+```bash
+python -m unittest agent.evolution.test_mutator.ValidatorUnitTests agent.evolution.test_mutator.ValidatorIntegrationTests agent.evolution.test_mutator.MutatorStubTests -v
+```
+
+---
+
+## v3 Day 3 — Selector + shadow deployment
+
+**Date:** 2026-06-01 · Ticket: [`docs/v3_day3_ticket.md`](v3_day3_ticket.md)
+
+### Schema
+
+- [`db/migrations/008_shadow_evaluations.sql`](../db/migrations/008_shadow_evaluations.sql) — mirror of `evaluations` for `forecasts_shadow`
+
+**Operator:** Apply after 007:
+
+```bash
+psql $DATABASE_URL -f db/migrations/008_shadow_evaluations.sql
+```
+
+### Code
+
+- [`agent/lib/forecast_writer.py`](../agent/lib/forecast_writer.py) — `emit_forecasts(..., table=, lineage_id=)` shadow sink
+- [`agent/evolution/selector.py`](../agent/evolution/selector.py) — disjoint-window backtest, top-3 → `status='shadow'`
+- [`agent/evolution/shadow_runner.py`](../agent/evolution/shadow_runner.py) — cadence-bucketed live shadow runs + rate limit
+- [`agent/modal_skills/shadow-runner/app.py`](../agent/modal_skills/shadow-runner/app.py) — Modal crons `*/30` + `0 */3`
+- [`agent/modal_skills/forecast-evaluator/run.py`](../agent/modal_skills/forecast-evaluator/run.py) — additive `shadow_evaluations` scan
+- [`agent/evolution/shadow_stats.py`](../agent/evolution/shadow_stats.py) — shadow Brier readout for Day 4
+- [`agent/evolution/test_selector.py`](../agent/evolution/test_selector.py) — Day 3 acceptance tests (9 cases)
+
+**Run:**
+
+```bash
+python agent/evolution/test_selector.py
+python agent/evolution/selector.py --dry-run
+python agent/evolution/shadow_runner.py --cadence-minutes 30
+python -m modal deploy agent/modal_skills/shadow-runner/app.py
+python -m modal deploy agent/modal_skills/forecast-evaluator/app.py
+```
+
+**Manual shadow test** (before selector has candidates):
+
+```sql
+UPDATE skill_lineage SET status = 'shadow' WHERE id = '<candidate_lineage_id>';
+```
+
+**Deploy note:** Modal workspace may be at cron limit — upgrade plan or pause a manual-only app before shadow-runner deploy (adds 2 crons).
+
+**Out of scope this ticket:** operator review surface, promotion decision, curator orchestration (Day 4/5).
+
+---
+
+## v3 Day 4 — Orchestration + operator surface + closeout
+
+**Date:** 2026-06-01 · Ticket: [`docs/v3_day4_ticket.md`](v3_day4_ticket.md)
+
+### Code
+
+- [`agent/evolution/budget.py`](../agent/evolution/budget.py) — $5/pass cap, Sonnet→Haiku switch at 70%
+- [`agent/evolution/orchestrator.py`](../agent/evolution/orchestrator.py) — worst-K → mutate → select → shadow
+- [`agent/modal_skills/curator/run.py`](../agent/modal_skills/curator/run.py) — v3 evolution pass (v2 archived)
+- [`agent/evolution/proposal_review.py`](../agent/evolution/proposal_review.py) — blocked_on, diff, promote/discard
+- [`agent/evolution/promotion.py`](../agent/evolution/promotion.py) — write `run.py` + print modal deploy command
+- [`tools/review_proposals.py`](../tools/review_proposals.py) — list/show/promote/discard CLI
+- [`agent/evolution/test_day4.py`](../agent/evolution/test_day4.py) — 11 acceptance tests
+
+**Run:**
+
+```bash
+python agent/evolution/test_day4.py
+python agent/evolution/orchestrator.py          # local evolution pass
+python -m modal run agent/modal_skills/curator/app.py
+python tools/review_proposals.py list
+python tools/review_proposals.py show <id>
+python tools/review_proposals.py promote <id>   # refuses until shadow n≥20
+python -m modal deploy agent/modal_skills/curator/app.py
+```
+
+**First real run checklist** (success = clean loop, not a promotion):
+
+1. Harness sanity + mutator acceptance fixes green
+2. Migrations 006–008 applied
+3. Run curator pass; verify mutator candidate OR selector clean refuse
+4. No writes to live `forecasts` from evolution components
+5. Pass spend ≤ $5; `promote` refuses on cold-start (`evals N/20`)
+
+**v3 closeout deviations:** generator → v3.1; diversity penalty cut; tiered auto-approve deferred; `/agent` shadow display optional (CLI is operator surface).
+
+**Open:** cold-start backlog until ≥20 shadow evals accumulate; Modal cron budget for curator + shadow-runner deploy.

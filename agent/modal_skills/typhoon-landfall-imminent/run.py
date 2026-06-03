@@ -39,6 +39,7 @@ for _lib in ("/root/agent_lib", Path(__file__).resolve().parents[2] / "lib"):
 from trace_builder import TraceBuilder  # noqa: E402
 from reasoning_llm import generate_reasoning  # noqa: E402
 from reasoning_prompts import prompt_typhoon_landfall  # noqa: E402
+from forecast_model import Forecast  # noqa: E402
 
 # --- config ---------------------------------------------------------------
 SKILL_ID = "typhoon_landfall_imminent"
@@ -328,45 +329,20 @@ def build_reasoning(name, classification, n_cities, top_cities,
     )
 
 
-# --- write ---------------------------------------------------------------
-def insert_forecast(conn: Connection, forecast):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO forecasts (
-              id, issued_at, valid_from, valid_until,
-              disaster_class, geometry, probability,
-              skill_id, skill_version, contributing_signal_ids,
-              reasoning, is_baseline, trace
-            ) VALUES (
-              %(id)s, %(issued_at)s, %(valid_from)s, %(valid_until)s,
-              %(disaster_class)s,
-              ST_Force2D(ST_SetSRID(ST_GeomFromGeoJSON(%(geometry)s), 4326)),
-              %(probability)s,
-              %(skill_id)s, %(skill_version)s,
-              %(contributing_signal_ids)s::uuid[],
-              %(reasoning)s, %(is_baseline)s,
-              %(trace)s::jsonb
-            )
-            """,
-            forecast,
-        )
-
-
 # --- run -----------------------------------------------------------------
-def run(now: datetime, db: Connection) -> int:
+def run(now: datetime, db: Connection) -> list[Forecast]:
     valid_until = now + timedelta(hours=FORECAST_VALID_HOURS)
 
     storms = load_active_storms(db, now)
     if not storms:
         print(f"[{SKILL_ID}] no active NHC advisories in last "
               f"{LATEST_BULLETIN_WINDOW_HOURS}h.")
-        return 0
+        return []
 
     print(f"[{SKILL_ID}] {len(storms)} active storm(s).")
     places_queried = count_populated_places_catalog(db)
 
-    written = 0
+    out: list[Forecast] = []
     for sig_id, _ts, payload in storms:
         name = storm_display_name(payload)
         cls = storm_classification(payload)
@@ -442,41 +418,25 @@ def run(now: datetime, db: Connection) -> int:
         )
         reasoning = generate_reasoning(prompt, fallback)
 
-        forecast = {
-            "id": str(uuid.uuid4()),
-            "issued_at": now,
-            "valid_from": now,
-            "valid_until": valid_until,
-            "disaster_class": "typhoon",
-            "geometry": json.dumps(cone_geojson),
-            "probability": prob,
-            "skill_id": SKILL_ID,
-            "skill_version": SKILL_VERSION,
-            "contributing_signal_ids": [str(sig_id)],
-            "reasoning": reasoning,
-            "is_baseline": False,
-            "trace": json.dumps(trace_dict),
-        }
-        insert_forecast(db, forecast)
-        written += 1
+        out.append(
+            Forecast(
+                id=str(uuid.uuid4()),
+                issued_at=now,
+                valid_from=now,
+                valid_until=valid_until,
+                disaster_class="typhoon",
+                geometry=json.dumps(cone_geojson),
+                probability=prob,
+                skill_id=SKILL_ID,
+                skill_version=SKILL_VERSION,
+                contributing_signal_ids=[str(sig_id)],
+                reasoning=reasoning,
+                is_baseline=False,
+                trace=trace_dict,
+            )
+        )
         print(f"[{SKILL_ID}]   {name}: cone covers {len(cities)} cities, "
               f"~{total_pop:,} pop, p={prob}")
 
-    db.commit()
-    print(f"[{SKILL_ID}] wrote {written} forecasts.")
-    return written
-
-
-def main() -> int:
-    now = parse_now()
-    with psycopg.connect(DATABASE_URL, autocommit=False) as db:
-        run(now, db)
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except Exception as e:  # noqa: BLE001
-        print(f"[{SKILL_ID}] ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+    print(f"[{SKILL_ID}] emitted {len(out)} forecast(s).")
+    return out

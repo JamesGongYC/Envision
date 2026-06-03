@@ -3,17 +3,30 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import modal
 
 APP_NAME = "forecast-evaluator"
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 
+
+def _agent_lib() -> str | None:
+    p = Path(__file__).resolve()
+    if "modal_skills" not in p.parts:
+        return None
+    lib = Path(*p.parts[: p.parts.index("modal_skills")]) / "lib"
+    return str(lib) if lib.is_dir() else None
+
+
+_lib = _agent_lib()
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("psycopg[binary]")
+    .pip_install("psycopg[binary]", "shapely")
     .add_local_dir(SKILL_DIR, remote_path="/root/skill")
 )
+if _lib:
+    image = image.add_local_dir(_lib, remote_path="/root/agent_lib")
 
 app = modal.App(APP_NAME)
 secret = modal.Secret.from_name("envision-neon")
@@ -29,6 +42,7 @@ def evaluate_cycle() -> int:
     import sys
 
     sys.path.insert(0, "/root/skill")
+    sys.path.insert(0, "/root/agent_lib")
     import psycopg
 
     from run import run

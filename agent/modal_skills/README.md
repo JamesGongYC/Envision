@@ -44,10 +44,12 @@ Optional: `JTWC_USER_AGENT` (browser-like string) if JTWC returns 403 from Modal
 | `jtwc-cyclones` | every 6h | JTWC ATCF WP cyclones → `cyclone_advisory` |
 | `nws-fire-alerts` | every 30m | NWS fire-weather alerts → `fire_warning` |
 | `firms-active-fires` | every 30m | FIRMS VIIRS+MODIS 6-bbox global → `hotspot` |
-| `wildfire-rapid-growth` | every 30m | Grid growth detection → `forecasts` |
+| `wildfire-rapid-growth` | every 30m | Grid growth detection → `forecasts` (via `emit_forecasts(run(...))`) |
 | `wildfire-risk-elevated` | every 30m | DBSCAN + NWS/ECMWF/AIFS polygons → `forecasts` |
 | `typhoon-intensifying` | every 3h | NHC pressure trend → `forecasts` |
 | `typhoon-landfall-imminent` | every 3h | Cone vs populated places → `forecasts` |
+
+Detection Modal entrypoints: `emit_forecasts(run(now, db), db)` from [`agent/lib/forecast_writer.py`](../lib/forecast_writer.py). v3 backtest calls `run()` only (no writes).
 
 \* **Modal cron limit:** upgrade workspace plan before deploying all scheduled apps (~17+ crons with full v2.5 stack).
 
