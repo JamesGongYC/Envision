@@ -1,0 +1,17 @@
+---
+description: Test isolation — tests must never write to the production database
+globs: ["agent/**/test_*.py", "tests/**/*.py", "**/*_test.py"]
+alwaysApply: false
+---
+
+# Test database isolation
+
+Tests and smoke runs MUST NOT write to the production Neon database (the one
+the Vercel viewer and the Modal skills read/write).
+
+- Never INSERT into live tables (`skill_edit_proposals`, `skill_lineage`,
+  `forecasts`, `forecasts_shadow`, `signals`, `evaluations`) from a test.
+- Use one of: a separate test `DATABASE_URL`; a transaction rolled back in
+  teardown; or capture every inserted id and delete it in teardown.
+- A passing test must leave the database exactly as it found it. The operator
+  approval queue is production state — never seed it with fixtures.
