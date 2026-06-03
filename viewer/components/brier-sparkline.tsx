@@ -40,7 +40,7 @@ export function BrierSparkline({
         width={width}
         height={height}
         viewBox={`0 0 ${width} ${height}`}
-        className="text-slate-400"
+        className="text-[var(--muted)]"
         aria-hidden
       >
         {data.map((d, i) => {
@@ -85,7 +85,7 @@ export function BrierSparkline({
       width={width}
       height={height}
       viewBox={`0 0 ${width} ${height}`}
-      className="text-slate-400"
+      className="text-[var(--muted)]"
       aria-hidden
     >
       <polyline

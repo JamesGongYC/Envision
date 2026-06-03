@@ -9,13 +9,17 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^3.0.0",
+    "@floating-ui/react": "^0.27.19",
     "@neondatabase/serverless": "^1.1.0",
+    "@xyflow/react": "^12.11.0",
     "leaflet": "^1.9.4",
     "leaflet-velocity": "^2.1.4",
     "next": "16.2.6",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "react-leaflet": "^5.0.0"
+    "react-leaflet": "^5.0.0",
+    "server-only": "^0.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

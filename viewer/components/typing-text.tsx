@@ -6,7 +6,6 @@ export type TypingTextProps = {
   text: string;
   charsPerSecond?: number;
   showCursor?: boolean;
-  skip?: boolean;
   onComplete?: () => void;
 };
 
@@ -14,23 +13,18 @@ export function TypingText({
   text,
   charsPerSecond = 30,
   showCursor = true,
-  skip = false,
   onComplete,
 }: TypingTextProps) {
-  const [displayedChars, setDisplayedChars] = useState(skip ? text.length : 0);
+  const [displayedChars, setDisplayedChars] = useState(0);
   const done = displayedChars >= text.length;
 
   useEffect(() => {
-    if (skip) {
-      setDisplayedChars(text.length);
-      return;
-    }
     setDisplayedChars(0);
-  }, [text, skip]);
+  }, [text]);
 
   useEffect(() => {
-    if (skip || done) {
-      if (done) onComplete?.();
+    if (done) {
+      onComplete?.();
       return;
     }
     const interval = setInterval(() => {
@@ -43,13 +37,13 @@ export function TypingText({
       });
     }, 1000 / charsPerSecond);
     return () => clearInterval(interval);
-  }, [text, charsPerSecond, skip, done, onComplete]);
+  }, [text, charsPerSecond, done, onComplete]);
 
   return (
     <span>
       {text.slice(0, displayedChars)}
-      {showCursor && !done && !skip && (
-        <span className="animate-pulse text-neutral-500">▊</span>
+      {showCursor && !done && (
+        <span className="animate-pulse text-[var(--muted)]">▊</span>
       )}
     </span>
   );

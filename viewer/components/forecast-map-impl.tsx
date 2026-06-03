@@ -1,10 +1,13 @@
 'use client';
 
-import { MapContainer, TileLayer } from 'react-leaflet';
+import { useEffect, useState } from 'react';
+import type { LatLng } from 'leaflet';
+import { MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import type { Forecast } from '@/lib/types';
 import { LAYER_QUERY_CONFIG } from '@/lib/layer-config';
 import type { LayerId } from '@/lib/layer-state';
 import { useLayerVisibility } from '@/components/layer-visibility-provider';
+import { ForecastMapPopover } from '@/components/forecast-map-popover';
 import { ForecastsLayer } from '@/components/forecasts-layer';
 import { GroundTruthLayer } from '@/components/ground-truth-layer';
 import { MapPanes } from '@/components/map-panes';
@@ -28,6 +31,34 @@ const POLYGON_LAYER_IDS: LayerId[] = [
   'aifs_high_wind',
   'aifs_heavy_precipitation',
 ];
+
+function MapInvalidateSize() {
+  const map = useMap();
+
+  useEffect(() => {
+    const invalidate = () => {
+      map.invalidateSize();
+    };
+
+    invalidate();
+    const t = window.setTimeout(invalidate, 100);
+
+    const container = map.getContainer();
+    const ro = new ResizeObserver(() => {
+      invalidate();
+    });
+    ro.observe(container);
+    window.addEventListener('resize', invalidate);
+
+    return () => {
+      window.clearTimeout(t);
+      ro.disconnect();
+      window.removeEventListener('resize', invalidate);
+    };
+  }, [map]);
+
+  return null;
+}
 
 function ActiveSignalLayers() {
   const { visibility } = useLayerVisibility();
@@ -62,6 +93,46 @@ function ActivePolygonLayers() {
   );
 }
 
+type SelectedForecast = { forecast: Forecast; latLng: LatLng };
+
+function ForecastMapOverlays({ forecasts }: { forecasts: Forecast[] }) {
+  const { visibility } = useLayerVisibility();
+  const [selected, setSelected] = useState<SelectedForecast | null>(null);
+
+  useMapEvents({
+    click() {
+      setSelected(null);
+    },
+  });
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelected(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  return (
+    <>
+      {visibility.forecasts && (
+        <ForecastsLayer
+          forecasts={forecasts}
+          onForecastSelect={(forecast, latLng) =>
+            setSelected({ forecast, latLng })
+          }
+        />
+      )}
+      {selected && (
+        <ForecastMapPopover
+          forecast={selected.forecast}
+          latLng={selected.latLng}
+        />
+      )}
+    </>
+  );
+}
+
 export default function ForecastMapImpl({
   forecasts,
 }: {
@@ -78,6 +149,7 @@ export default function ForecastMapImpl({
       scrollWheelZoom
       style={{ height: '100%', width: '100%' }}
     >
+      <MapInvalidateSize />
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>'
         url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
@@ -89,7 +161,7 @@ export default function ForecastMapImpl({
       {visibility.aifs_wind_field && <WindLayer />}
       <ActiveSignalLayers />
       <ActivePolygonLayers />
-      {visibility.forecasts && <ForecastsLayer forecasts={forecasts} />}
+      <ForecastMapOverlays forecasts={forecasts} />
     </MapContainer>
   );
 }

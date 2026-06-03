@@ -10,18 +10,21 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  DEFAULT_VISIBILITY,
+  DEFAULT_UI_VISIBILITY,
   STORAGE_KEY,
-  mergeVisibility,
-  type LayerId,
+  expandVisibility,
+  mergeUiVisibility,
   type LayerVisibility,
+  type MapLayerToggle,
+  type MapLayerVisibility,
 } from '@/lib/layer-state';
 
 type LayerVisibilityContextValue = {
+  uiVisibility: MapLayerVisibility;
   visibility: LayerVisibility;
   hydrated: boolean;
-  toggle: (id: LayerId) => void;
-  setAll: (state: Partial<LayerVisibility>) => void;
+  toggle: (id: MapLayerToggle) => void;
+  setAll: (state: Partial<MapLayerVisibility>) => void;
 };
 
 const LayerVisibilityContext = createContext<LayerVisibilityContextValue | null>(
@@ -29,14 +32,27 @@ const LayerVisibilityContext = createContext<LayerVisibilityContextValue | null>
 );
 
 export function LayerVisibilityProvider({ children }: { children: ReactNode }) {
-  const [visibility, setVisibility] = useState<LayerVisibility>(DEFAULT_VISIBILITY);
+  const [uiVisibility, setUiVisibility] =
+    useState<MapLayerVisibility>(DEFAULT_UI_VISIBILITY);
   const [hydrated, setHydrated] = useState(false);
+
+  const normalizedUiVisibility = useMemo(
+    () => mergeUiVisibility(uiVisibility),
+    [uiVisibility]
+  );
+
+  const visibility = useMemo(
+    () => expandVisibility(normalizedUiVisibility),
+    [normalizedUiVisibility]
+  );
 
   useEffect(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
-        setVisibility(mergeVisibility(JSON.parse(stored) as Partial<LayerVisibility>));
+        setUiVisibility(
+          mergeUiVisibility(JSON.parse(stored) as Partial<MapLayerVisibility>)
+        );
       }
     } catch {
       // ignore corrupt localStorage
@@ -46,20 +62,32 @@ export function LayerVisibilityProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!hydrated) return;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(visibility));
-  }, [visibility, hydrated]);
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(mergeUiVisibility(uiVisibility))
+    );
+  }, [uiVisibility, hydrated]);
 
-  const toggle = useCallback((id: LayerId) => {
-    setVisibility((prev) => ({ ...prev, [id]: !prev[id] }));
+  const toggle = useCallback((id: MapLayerToggle) => {
+    setUiVisibility((prev) => {
+      const current = mergeUiVisibility(prev);
+      return { ...current, [id]: !current[id] };
+    });
   }, []);
 
-  const setAll = useCallback((state: Partial<LayerVisibility>) => {
-    setVisibility((prev) => ({ ...prev, ...state }));
+  const setAll = useCallback((state: Partial<MapLayerVisibility>) => {
+    setUiVisibility((prev) => mergeUiVisibility({ ...prev, ...state }));
   }, []);
 
   const value = useMemo(
-    () => ({ visibility, hydrated, toggle, setAll }),
-    [visibility, hydrated, toggle, setAll]
+    () => ({
+      uiVisibility: normalizedUiVisibility,
+      visibility,
+      hydrated,
+      toggle,
+      setAll,
+    }),
+    [normalizedUiVisibility, visibility, hydrated, toggle, setAll]
   );
 
   return (

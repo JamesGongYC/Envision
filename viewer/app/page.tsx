@@ -1,13 +1,11 @@
 import ForecastMap from '@/components/forecast-map';
-import { MapLayerPanel } from '@/components/map-layer-panel';
+import { Hero } from '@/components/hero';
+import { LandingSnapShell } from '@/components/landing-snap-shell';
+import { MapControlsBar } from '@/components/map-controls-bar';
+import { FORECASTS_MAP_ID } from '@/lib/landing-scroll';
 import { getActiveForecasts } from '@/lib/queries';
 
 export const revalidate = 60;
-
-// 5.5rem accounts for the disclaimer banner (~2rem) plus the header nav
-// (~3.5rem). Explicit viewport units sidestep the cascading-percentage
-// height problem that breaks Leaflet's mount-time clientHeight measurement.
-const MAP_HEIGHT = 'calc(100dvh - 5.5rem)';
 
 export default async function HomePage() {
   const forecasts = await getActiveForecasts();
@@ -20,42 +18,22 @@ export default async function HomePage() {
   ).length;
 
   return (
-    <div className="relative" style={{ height: MAP_HEIGHT }}>
-      <ForecastMap forecasts={forecasts} />
-      <MapLayerPanel />
-
-      {/* Status badge — top-left */}
-      <div className="absolute top-4 left-4 z-[400] bg-white/95 backdrop-blur px-3 py-2 rounded shadow-sm border border-neutral-200 text-xs">
-        <div className="font-medium text-neutral-900">
-          {forecasts.length} active forecast{forecasts.length === 1 ? '' : 's'}
+    <LandingSnapShell>
+      <Hero />
+      <section
+        id={FORECASTS_MAP_ID}
+        className="landing-snap-pane flex flex-col px-4 py-3 gap-3 min-h-0 overflow-visible"
+        aria-label="Forecasts map"
+      >
+        <MapControlsBar
+          forecastCount={forecasts.length}
+          wildfireCount={wildfireCount}
+          typhoonCount={typhoonCount}
+        />
+        <div className="flex-1 h-0 min-h-[12rem] rounded-lg border border-[var(--border)] overflow-hidden bg-[var(--surface)]">
+          <ForecastMap forecasts={forecasts} height="100%" />
         </div>
-        {forecasts.length > 0 && (
-          <div className="text-neutral-500 mt-0.5">
-            {wildfireCount} wildfire · {typhoonCount} typhoon
-          </div>
-        )}
-        {forecasts.length === 0 && (
-          <div className="text-neutral-500 mt-0.5 max-w-[16rem]">
-            No active forecasts right now. Detectors may still be warming up,
-            or no events meet detection thresholds.
-          </div>
-        )}
-      </div>
-
-      {/* Legend — left side (layer panel is top-right) */}
-      <div className="absolute top-4 left-4 z-[400] mt-20 bg-white/95 backdrop-blur px-3 py-2 rounded shadow-sm border border-neutral-200 text-xs space-y-1 max-w-[11rem]">
-        <div className="flex items-center gap-1.5">
-          <span className="inline-block h-3 w-3 rounded-sm border-2 border-red-600 bg-red-300/70" />
-          <span>Wildfire</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="inline-block h-3 w-3 rounded-sm border-2 border-blue-600 bg-blue-300/70" />
-          <span>Typhoon</span>
-        </div>
-        <div className="text-neutral-500 pt-1 mt-1 border-t border-neutral-200">
-          Opacity ∝ probability
-        </div>
-      </div>
-    </div>
+      </section>
+    </LandingSnapShell>
   );
 }

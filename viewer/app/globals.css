@@ -1,12 +1,37 @@
 @import "tailwindcss";
 @import "leaflet/dist/leaflet.css";
 
-/* Envision viewer is always rendered light. The map and disclaimer copy
-   are calibrated for a white background; honoring dark mode would require
-   a parallel palette we don't have time for in v1. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0a0a0b;
+  --foreground: #e8e8ea;
+  --surface: #141416;
+  --surface-elevated: #1c1c1f;
+  --border: #2a2a2e;
+  --muted: #8a8a92;
+  --chrome: 5.5rem;
+  --control-bar: 3.25rem;
+  --forecasts-padding: 1.5rem;
+}
+
+.landing-snap {
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scroll-snap-type: y mandatory;
+  scroll-behavior: smooth;
+  height: calc(100dvh - var(--chrome));
+}
+
+.landing-snap-pane {
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+  flex-shrink: 0;
+  height: calc(100dvh - var(--chrome));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-snap {
+    scroll-behavior: auto;
+  }
 }
 
 body {
@@ -14,8 +39,56 @@ body {
   color: var(--foreground);
 }
 
-/* Leaflet map container needs a definite background while tiles load,
-   in case the tile provider is slow or unreachable. */
 .leaflet-container {
-  background: #f5f5f5;
+  background: #0a0a0b;
+}
+
+/* leaflet-velocity legend on dark basemap */
+.leaflet-control-velocity {
+  background: rgba(20, 20, 22, 0.92) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--foreground) !important;
+  box-shadow: none !important;
+}
+
+.leaflet-control-velocity .velocity-overlay {
+  color: var(--foreground) !important;
+}
+
+/* Forecast floating popover (side of marker, inside map box) */
+.forecast-map-popover {
+  pointer-events: auto;
+}
+
+.forecast-map-popover--right::before,
+.forecast-map-popover--left::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border: 6px solid transparent;
+  transform: translateY(-50%);
+}
+
+.forecast-map-popover--right::before {
+  left: -12px;
+  border-right-color: var(--border);
+}
+
+.forecast-map-popover--left::before {
+  right: -12px;
+  border-left-color: var(--border);
+}
+
+@keyframes lineage-dash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__edge path {
+    animation: none !important;
+  }
 }

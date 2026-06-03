@@ -3,20 +3,10 @@ import {
   getLastCuratorActivity,
   getLastIngestionTimestamp,
 } from '@/lib/agent-queries';
+import { curatorStatusLabel } from '@/lib/curator-status';
 import { formatTimeAgo } from '@/lib/time-ago';
 
 export const revalidate = 60;
-
-const CURATOR_STALE_MS = 30 * 60 * 60 * 1000;
-
-function curatorStatusLabel(lastProposed: string | null): string {
-  if (!lastProposed) return 'Curator: inactive (stale)';
-  const age = Date.now() - new Date(lastProposed).getTime();
-  if (age > CURATOR_STALE_MS) {
-    return 'Curator: inactive (stale)';
-  }
-  return `Curator: active (last run ${formatTimeAgo(lastProposed)})`;
-}
 
 export async function StatusHeader() {
   const [skillCount, lastIngestion, lastCurator] = await Promise.all([

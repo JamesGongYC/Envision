@@ -1,8 +1,8 @@
 'use client';
 
-import { GeoJSON, Popup, CircleMarker } from 'react-leaflet';
+import L from 'leaflet';
+import { GeoJSON, CircleMarker } from 'react-leaflet';
 import type { Forecast } from '@/lib/types';
-import { ForecastDropdown } from '@/components/forecast-dropdown';
 
 const FORECASTS_PANE = 'forecastsPane';
 
@@ -39,8 +39,14 @@ function geometryCentroid(
   return [sumLat / ring.length, sumLon / ring.length];
 }
 
-/** Active forecast polygons and centroid markers (click → ForecastDropdown). */
-export function ForecastsLayer({ forecasts }: { forecasts: Forecast[] }) {
+/** Active forecast polygons and centroid markers (click → floating popover). */
+export function ForecastsLayer({
+  forecasts,
+  onForecastSelect,
+}: {
+  forecasts: Forecast[];
+  onForecastSelect: (forecast: Forecast, latLng: L.LatLng) => void;
+}) {
   return (
     <>
       {forecasts.map((f) => {
@@ -69,6 +75,7 @@ export function ForecastsLayer({ forecasts }: { forecasts: Forecast[] }) {
         const center = geometryCentroid(f.geometry);
         if (!center) return null;
         const style = CLASS_STYLES[f.disaster_class];
+        const latLng = L.latLng(center[0], center[1]);
         return (
           <CircleMarker
             key={`${f.id}-marker`}
@@ -82,11 +89,13 @@ export function ForecastsLayer({ forecasts }: { forecasts: Forecast[] }) {
               weight: 2.5,
               opacity: 1,
             }}
-          >
-            <Popup>
-              <ForecastDropdown forecast={f} />
-            </Popup>
-          </CircleMarker>
+            eventHandlers={{
+              click: (e) => {
+                L.DomEvent.stopPropagation(e);
+                onForecastSelect(f, latLng);
+              },
+            }}
+          />
         );
       })}
     </>
