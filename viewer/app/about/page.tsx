@@ -52,10 +52,8 @@ export default function AboutPage() {
 
       <h2 className="mt-10 text-xl font-semibold">Scoring terms</h2>
       <ul className="mt-3 list-disc pl-6 text-neutral-700 space-y-2 text-sm">
-        <li title="Brier score: a calibration metric for probabilistic forecasts. Lower is better. A perfect skill scores 0; random guessing scores around 0.25.">
-          <strong>Brier score</strong> — calibration metric for probabilistic
-          forecasts. Lower is better. A perfect skill scores 0; random guessing
-          scores around 0.25.
+        <li title="Brier score: a calibration metric for probabilistic forecasts. Lower is better.">
+          <strong>Brier score</strong> — calibration metric for probabilistic forecasts. Lower is better.
         </li>
         <li title="Hit: forecast issued and a matching ground-truth event occurred within the validity window.">
           <strong>Hit</strong> — a forecast was issued and a matching
