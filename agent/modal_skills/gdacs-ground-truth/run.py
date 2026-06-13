@@ -131,18 +131,42 @@ def to_params(item, now: datetime) -> dict | None:
 
 
 def insert_many(db: Connection, rows: list[dict]) -> int:
-    sql = """
+    """Insert or update GDACS rows keyed by (source, eventid)."""
+    upsert_sql = """
+        INSERT INTO ground_truth (
+            occurred_at, source, disaster_class, geometry, severity, payload
+        )
+        VALUES (
+            %(occurred_at)s, %(source)s, %(disaster_class)s,
+            ST_Force2D(ST_SetSRID(ST_GeomFromGeoJSON(%(geometry)s), 4326)),
+            %(severity)s, %(payload)s::jsonb
+        )
+        ON CONFLICT (source, event_key) DO UPDATE SET
+            payload = EXCLUDED.payload,
+            geometry = EXCLUDED.geometry,
+            severity = EXCLUDED.severity,
+            disaster_class = EXCLUDED.disaster_class
+    """
+    fallback_sql = """
         INSERT INTO ground_truth (occurred_at, source, disaster_class, geometry, severity, payload)
         VALUES (
             %(occurred_at)s, %(source)s, %(disaster_class)s,
             ST_Force2D(ST_SetSRID(ST_GeomFromGeoJSON(%(geometry)s), 4326)),
             %(severity)s, %(payload)s::jsonb
-        );
+        )
     """
+    n = 0
     with db.cursor() as cur:
-        cur.executemany(sql, rows)
+        for row in rows:
+            payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+            if payload.get("eventid"):
+                cur.execute(upsert_sql, row)
+            else:
+                cur.execute(fallback_sql, row)
+            n += cur.rowcount
     db.commit()
-    return len(rows)
+    print(f"[{SKILL_ID}] wrote {n} GDACS ground-truth row(s).")
+    return n
 
 
 def run(now: datetime, db: Connection) -> int:
@@ -155,7 +179,6 @@ def run(now: datetime, db: Connection) -> int:
         )
         return 0
     n = insert_many(db, rows)
-    print(f"[{SKILL_ID}] inserted {n} GDACS ground-truth events (from {len(items)} feed items).")
     return n
 
 

@@ -335,6 +335,17 @@ def _looks_like_forecast(obj: Any) -> bool:
     return hasattr(obj, "probability") and hasattr(obj, "geometry")
 
 
+_TRACE_MAX_BYTES = 2048
+
+
+def _truncate_traceback(tb: str, max_bytes: int = _TRACE_MAX_BYTES) -> str:
+    encoded = tb.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return tb
+    tail = encoded[-max_bytes:].decode("utf-8", errors="replace")
+    return f"... (traceback truncated)\n{tail}"
+
+
 def sandbox_smoke_run(
     parent_source: str,
     candidate_source: str,
@@ -342,6 +353,11 @@ def sandbox_smoke_run(
     db: Connection,
     now: datetime,
 ) -> tuple[bool, str, str | None]:
+    """
+    Smoke-run candidate run(now, db) against prod read paths.
+    Writes are blocked via _blocked_execute; the connection is rolled back after
+    each run so candidate code cannot persist changes (see test-db-isolation rule).
+    """
     t = _pick_smoke_time(db, now)
     prev_bt = os.environ.get(_BACKTEST_ENV)
     os.environ[_BACKTEST_ENV] = "1"
@@ -373,10 +389,11 @@ def sandbox_smoke_run(
                 None,
             )
         return True, f"emitted {len(candidate_out)} at t={t.isoformat()}", None
-    except Exception:
-        tb = traceback.format_exc()
-        return False, "runtime error in sandbox", tb
+    except Exception as e:
+        tb = _truncate_traceback(traceback.format_exc())
+        return False, f"{type(e).__name__}: {e}", tb
     finally:
+        db.rollback()
         if prev_bt is None:
             os.environ.pop(_BACKTEST_ENV, None)
         else:
@@ -465,6 +482,8 @@ def validate_candidate(
         parent_source, candidate_source, skill_id, db, now
     )
     report.sandbox_traceback = tb
+    if not ok and tb:
+        report.rejection_reasons.append(f"sandbox_traceback: {tb[:1500]}")
     if not _stage(
         report,
         "sandbox",

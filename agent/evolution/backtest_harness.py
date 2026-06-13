@@ -32,6 +32,7 @@ from agent.evolution.backtest_connection import (  # noqa: E402
     BacktestConnection,
     SKILL_LOOKBACK,
 )
+from agent.evolution.constants import BACKTEST_EPOCH  # noqa: E402
 from agent.evolution.skill_loader import SKILL_FOLDERS, load_skill_run  # noqa: E402
 
 SKILL_CADENCE: dict[str, timedelta] = {
@@ -149,9 +150,10 @@ def _score_window(
     *,
     grace_hours: int = 0,
 ) -> tuple[int, int, int, float | None]:
-    hits = fp = misses = 0
+    hits = fp = 0
     brier_sum = 0.0
     n_scored = 0
+    matched_gt_ids: set[Any] = set()
     for f in forecasts:
         matched = match_forecast_to_truth(f, ground_truth, grace_hours=grace_hours)
         outcome, b = brier_contribution(f, matched)
@@ -159,10 +161,16 @@ def _score_window(
             hits += 1
         elif outcome == "false_positive":
             fp += 1
-        else:
-            misses += 1
+        if matched is not None:
+            gt_id = matched.id if hasattr(matched, "id") else matched[0]
+            matched_gt_ids.add(gt_id)
         brier_sum += b
         n_scored += 1
+    misses = sum(
+        1
+        for row in ground_truth
+        if (row.id if hasattr(row, "id") else row[0]) not in matched_gt_ids
+    )
     mean_brier = (brier_sum / n_scored) if n_scored else None
     return hits, fp, misses, mean_brier
 
@@ -198,6 +206,11 @@ def backtest_skill(
             we = window_end if window_end.tzinfo else window_end.replace(
                 tzinfo=timezone.utc
             )
+            if ws < BACKTEST_EPOCH:
+                raise ValueError(
+                    f"backtest window_start {ws.isoformat()} is before "
+                    f"BACKTEST_EPOCH {BACKTEST_EPOCH.isoformat()}"
+                )
             ground_truth = _load_ground_truth(db, ws, we)
             collected: list[Forecast] = []
 

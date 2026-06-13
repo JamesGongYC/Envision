@@ -63,6 +63,8 @@ def load_run_from_source(source: str, skill_id: str) -> Callable[[datetime, obje
     mod.__file__ = f"<mutant:{skill_id}>"
     sys.modules[mod_name] = mod
     compiled = compile(source, mod.__file__, "exec")
+    # Deep synthetic path so skill bootstrap code (Path(__file__).parents[2]) works.
+    mod.__dict__["__file__"] = "/root/agent/modal_skills/_loaded/run.py"
     exec(compiled, mod.__dict__)  # noqa: S102
     run_fn = getattr(mod, "run", None)
     if run_fn is None:

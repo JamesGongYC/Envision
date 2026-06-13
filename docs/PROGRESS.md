@@ -679,3 +679,43 @@ python -m modal deploy agent/modal_skills/curator/app.py
 **v3 closeout deviations:** generator → v3.1; diversity penalty cut; tiered auto-approve deferred; `/agent` shadow display optional (CLI is operator surface).
 
 **Open:** cold-start backlog until ≥20 shadow evals accumulate; Modal cron budget for curator + shadow-runner deploy.
+
+## v3.1 — Frontend refactor (viewer-only)
+
+**Date:** 2026-05-30
+
+Dark commercial pass on `viewer/` only — no agent, Modal, or schema changes.
+
+### Routes & naming (avoid confusion with evolution backlog “v3.1”)
+
+| Old | New |
+|-----|-----|
+| `/` (map only) | `/` — hero + Forecasts map (stacked) |
+| `/agent` | `/evolution` (redirect permanent) |
+| `/about` | `/how-it-works` (redirect permanent); nav label **About** |
+| — | `/disclaimer` — locked §12 + non-goals (footer link) |
+
+### Map layers (Option C)
+
+- **Forecasts** — model forecast polygons (default ON)
+- **Detections** — all signal layers incl. `high_wind_corridor`, grids, hotspots, advisories, GDACS (default ON)
+- **Atmosphere** — AIFS surface-wind velocity field only (`WindLayer` / `/api/wind`; default OFF, lazy-mount)
+
+Layer prefs key: `envision.layers.v31`.
+
+### Day 1 shipped
+
+- Dark monochrome tokens, Space Grotesk + IBM Plex Mono
+- Landing hero (ghost wildfire skill source, scroll to map)
+- 3-layer panel, signal de-dup on forecast card + `/forecast/[id]`
+- Global disclaimer banner retained
+
+### Day 2 shipped
+
+- **`/evolution`** — React Flow + dagre lineage tree; live Brier from `evaluations` (not backtest); shadow nodes `evaluating · N/20`; `metric-legend.tsx`
+- **`/how-it-works`** — Ingest → Forecast → Evolve pipeline panels; telemetry from former `StatusHeader` queries; data sources relocated from old `/about`
+- **`/disclaimer`** — §12 verbatim + non-goals only
+
+**Deps added:** `@xyflow/react`, `@dagrejs/dagre`.
+
+**Deploy:** Vercel Root Directory `viewer/`; `DATABASE_URL` required in all envs.

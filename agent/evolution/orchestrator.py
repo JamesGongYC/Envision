@@ -131,29 +131,27 @@ def run_evolution_pass(
 
     if not targets:
         print(f"[{SKILL_ID}] no skills targeted for mutation")
-        summary.budget = tracker.summary()
-        return summary
+    else:
+        print(f"[{SKILL_ID}] targeting worst-K: {targets}")
 
-    print(f"[{SKILL_ID}] targeting worst-K: {targets}")
-
-    for skill_id in targets:
-        if not tracker.can_afford_next_call():
-            print(f"[{SKILL_ID}] budget exhausted; stopping before {skill_id}")
-            summary.skipped += 1
-            break
-        summary.mutated += 1
-        print(f"[{SKILL_ID}] mutating {skill_id}...")
-        result = mutate_skill(skill_id, db, now=now, budget=tracker)
-        if result.accepted:
-            summary.accepted += 1
-            print(
-                f"[{SKILL_ID}] {skill_id}: accepted "
-                f"proposal={result.proposal_id[:8] if result.proposal_id else '?'}"
-            )
-        else:
-            print(
-                f"[{SKILL_ID}] {skill_id}: rejected — {result.rejection_reasons}"
-            )
+        for skill_id in targets:
+            if not tracker.can_afford_next_call():
+                print(f"[{SKILL_ID}] budget exhausted; stopping before {skill_id}")
+                summary.skipped += 1
+                break
+            summary.mutated += 1
+            print(f"[{SKILL_ID}] mutating {skill_id}...")
+            result = mutate_skill(skill_id, db, now=now, budget=tracker)
+            if result.accepted:
+                summary.accepted += 1
+                print(
+                    f"[{SKILL_ID}] {skill_id}: accepted "
+                    f"proposal={result.proposal_id[:8] if result.proposal_id else '?'}"
+                )
+            else:
+                print(
+                    f"[{SKILL_ID}] {skill_id}: rejected — {result.rejection_reasons}"
+                )
 
     sel = select_candidates(db, dry_run=False)
     summary.selected_to_shadow = sel.selected_lineage_ids

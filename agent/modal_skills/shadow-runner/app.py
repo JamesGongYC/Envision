@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,13 +21,12 @@ def _local_paths() -> tuple[Path | None, Path | None]:
 
 _agent_dir, _agent_lib = _local_paths()
 
-image = modal.Image.debian_slim(python_version="3.11").pip_install(
-    "psycopg[binary]", "shapely", "scikit-learn", "anthropic", "numpy"
-)
-if _agent_dir:
-    image = image.add_local_dir(str(_agent_dir), remote_path="/root/agent")
-if _agent_lib:
-    image = image.add_local_dir(str(_agent_lib), remote_path="/root/agent_lib")
+_shared = Path(__file__).resolve().parent.parent / "_shared"
+if str(_shared) not in sys.path:
+    sys.path.insert(0, str(_shared))
+from skill_exec_image import build_skill_exec_image  # noqa: E402
+
+image = build_skill_exec_image(agent_dir=_agent_dir, agent_lib=_agent_lib)
 
 app = modal.App(APP_NAME)
 secret = modal.Secret.from_name("envision-neon")

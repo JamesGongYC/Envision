@@ -18,8 +18,7 @@ sys.path.insert(0, str(REPO_ROOT / "agent" / "lib"))
 
 from agent.evolution.selector import (  # noqa: E402
     CandidateRow,
-    NOISE_FLOOR,
-    TOP_K,
+    PARENT_SPAM_MULTIPLIER,
     select_candidates,
 )
 from agent.evolution.shadow_runner import (  # noqa: E402
@@ -48,16 +47,31 @@ W3 = (
     datetime(2026, 4, 9, tzinfo=timezone.utc),
 )
 WINDOWS = [W1, W2, W3]
+VIABILITY = (
+    datetime(2026, 6, 1, tzinfo=timezone.utc),
+    datetime(2026, 6, 8, tzinfo=timezone.utc),
+)
 
 
-def _bt_row(brier: float, emitted: int = 5) -> BacktestRun:
+def _bt_run(
+    ws: datetime,
+    we: datetime,
+    *,
+    skill_id: str = "wildfire_risk_elevated",
+    brier: float = 0.3,
+    emitted: int = 5,
+    lineage_id: str | None = None,
+    version: int | None = None,
+) -> BacktestRun:
     return BacktestRun(
         id=str(uuid.uuid4()),
-        skill_id="wildfire_risk_elevated",
-        window_start=W1[0],
-        window_end=W1[1],
+        skill_id=skill_id,
+        window_start=ws,
+        window_end=we,
         brier_score=brier,
         forecasts_emitted=emitted,
+        lineage_id=lineage_id,
+        version=version,
     )
 
 
@@ -113,37 +127,123 @@ class SelectorUnitTests(unittest.TestCase):
             current_version=1,
         )
 
+    @patch("agent.evolution.selector._count_gt_post_epoch")
+    @patch("agent.evolution.selector.build_viability_window")
     @patch("agent.evolution.selector.load_pending_candidates")
-    @patch("agent.evolution.selector.build_disjoint_windows")
-    @patch("agent.evolution.selector.backtest_skill")
+    @patch("agent.evolution.selector._viability_gate")
     @patch("agent.evolution.selector.load_parent_lineage")
-    def test_selector_requires_improvement_in_all_windows(
-        self, mock_parent, mock_bt, mock_windows, mock_load
+    def test_selector_advances_on_thin_ground_truth(
+        self, mock_parent, mock_viab, mock_load, mock_viab_window, mock_gt_count
     ):
         mock_load.return_value = [self._candidate("c1")]
+        mock_viab_window.return_value = VIABILITY
+        mock_gt_count.return_value = 7
+        mock_parent.return_value = ("parent-lid", "parent code")
+        mock_viab.return_value = (True, [])
+        db = MagicMock()
+        result = select_candidates(db, dry_run=True)
+        self.assertEqual(result.selected_lineage_ids, ["c1"])
+        self.assertNotIn("c1", result.rejections)
+
+    @patch("agent.evolution.selector._count_gt_post_epoch")
+    @patch("agent.evolution.selector.build_viability_window")
+    @patch("agent.evolution.selector.load_pending_candidates")
+    @patch("agent.evolution.selector._viability_gate")
+    @patch("agent.evolution.selector.load_parent_lineage")
+    def test_selector_rejects_zero_emit(
+        self, mock_parent, mock_viab, mock_load, mock_viab_window, mock_gt_count
+    ):
+        mock_load.return_value = [self._candidate("c1")]
+        mock_viab_window.return_value = VIABILITY
+        mock_gt_count.return_value = 7
+        mock_parent.return_value = ("parent-lid", "parent code")
+        mock_viab.return_value = (False, ["candidate emitted 0 forecasts on window"])
+        db = MagicMock()
+        result = select_candidates(db, dry_run=True)
+        self.assertEqual(result.selected_lineage_ids, [])
+        self.assertIn("c1", result.rejections)
+
+    @patch("agent.evolution.selector._count_gt_post_epoch")
+    @patch("agent.evolution.selector.build_viability_window")
+    @patch("agent.evolution.selector.load_pending_candidates")
+    @patch("agent.evolution.selector._viability_gate")
+    @patch("agent.evolution.selector.load_parent_lineage")
+    def test_selector_rejects_spam_over_3x_parent(
+        self, mock_parent, mock_viab, mock_load, mock_viab_window, mock_gt_count
+    ):
+        mock_load.return_value = [self._candidate("c1")]
+        mock_viab_window.return_value = VIABILITY
+        mock_gt_count.return_value = 7
+        mock_parent.return_value = ("parent-lid", "parent code")
+        mock_viab.return_value = (
+            False,
+            ["forecast spam: 16 > 15 (parent emitted 5)"],
+        )
+        db = MagicMock()
+        result = select_candidates(db, dry_run=True)
+        self.assertEqual(result.selected_lineage_ids, [])
+        self.assertIn("c1", result.rejections)
+
+    @patch("agent.evolution.selector._count_gt_post_epoch")
+    @patch("agent.evolution.selector.build_viability_window")
+    @patch("agent.evolution.selector.load_pending_candidates")
+    @patch("agent.evolution.selector._viability_gate")
+    @patch("agent.evolution.selector.load_parent_lineage")
+    def test_selector_advances_all_qualifiers_no_topk_cap(
+        self, mock_parent, mock_viab, mock_load, mock_viab_window, mock_gt_count
+    ):
+        cands = [self._candidate(f"c{i}") for i in range(5)]
+        mock_load.return_value = cands
+        mock_viab_window.return_value = VIABILITY
+        mock_gt_count.return_value = 7
+        mock_parent.return_value = ("parent-lid", "parent code")
+        mock_viab.return_value = (True, [])
+        db = MagicMock()
+        result = select_candidates(db, dry_run=True)
+        self.assertEqual(len(result.selected_lineage_ids), 5)
+        for i in range(5):
+            self.assertIn(f"c{i}", result.selected_lineage_ids)
+
+    @patch("agent.evolution.selector.build_disjoint_windows")
+    @patch("agent.evolution.selector._count_gt_post_epoch")
+    @patch("agent.evolution.selector.build_viability_window")
+    @patch("agent.evolution.selector.load_pending_candidates")
+    @patch("agent.evolution.selector._viability_gate")
+    @patch("agent.evolution.selector.backtest_skill")
+    @patch("agent.evolution.selector.load_parent_lineage")
+    def test_selector_pathology_rejects_zero_emit_despite_viability(
+        self,
+        mock_parent,
+        mock_bt,
+        mock_viab,
+        mock_load,
+        mock_viab_window,
+        mock_gt_count,
+        mock_windows,
+    ):
+        mock_load.return_value = [self._candidate("c1")]
+        mock_viab_window.return_value = VIABILITY
+        mock_gt_count.return_value = 30
         mock_windows.return_value = WINDOWS
         mock_parent.return_value = ("parent-lid", "parent code")
-
-        call_idx = {"n": 0}
-        cand_briers = [0.26, 0.26, 0.28]
+        mock_viab.return_value = (True, [])
 
         def side_effect(skill_id, windows, db, **kwargs):
             is_parent = kwargs.get("lineage_id") == "parent-lid"
             ws, we = windows[0]
-            if is_parent:
-                b = 0.30
+            if (ws, we) == VIABILITY:
+                emitted = 5
+            elif is_parent:
+                emitted = 5
+            elif ws == W1[0]:
+                emitted = 0
             else:
-                i = call_idx["n"]
-                call_idx["n"] += 1
-                b = cand_briers[i]
+                emitted = 5
             return [
-                BacktestRun(
-                    id=str(uuid.uuid4()),
-                    skill_id=skill_id,
-                    window_start=ws,
-                    window_end=we,
-                    brier_score=b,
-                    forecasts_emitted=5,
+                _bt_run(
+                    ws,
+                    we,
+                    emitted=emitted,
                     lineage_id=kwargs.get("lineage_id"),
                     version=kwargs.get("version"),
                 )
@@ -154,65 +254,6 @@ class SelectorUnitTests(unittest.TestCase):
         result = select_candidates(db, dry_run=True)
         self.assertEqual(result.selected_lineage_ids, [])
         self.assertIn("c1", result.rejections)
-
-    @patch("agent.evolution.selector.load_pending_candidates")
-    @patch("agent.evolution.selector.build_disjoint_windows")
-    def test_selector_refuses_on_thin_ground_truth(
-        self, mock_windows, mock_load
-    ):
-        mock_load.return_value = [self._candidate("c1")]
-        mock_windows.return_value = []
-        db = MagicMock()
-        result = select_candidates(db, dry_run=True)
-        self.assertEqual(result.selected_lineage_ids, [])
-        self.assertIn("c1", result.rejections)
-
-    @patch("agent.evolution.selector.load_pending_candidates")
-    @patch("agent.evolution.selector.build_disjoint_windows")
-    @patch("agent.evolution.selector.backtest_skill")
-    @patch("agent.evolution.selector.load_parent_lineage")
-    def test_selector_topk(
-        self, mock_parent, mock_bt, mock_windows, mock_load
-    ):
-        cands = [self._candidate(f"c{i}") for i in range(5)]
-        mock_load.return_value = cands
-        mock_windows.return_value = WINDOWS
-        mock_parent.return_value = ("parent-lid", "parent code")
-
-        improvements = {"c0": 0.10, "c1": 0.08, "c2": 0.06, "c3": 0.04, "c4": 0.05}
-
-        def side_effect(skill_id, windows, db, **kwargs):
-            is_parent = kwargs.get("lineage_id") == "parent-lid"
-            lid = kwargs.get("lineage_id")
-            results = []
-            for ws, we in windows:
-                if is_parent:
-                    b = 0.30
-                else:
-                    imp = improvements.get(lid, 0.04)
-                    b = 0.30 - imp
-                results.append(
-                    BacktestRun(
-                        id=str(uuid.uuid4()),
-                        skill_id=skill_id,
-                        window_start=ws,
-                        window_end=we,
-                        brier_score=b,
-                        forecasts_emitted=5,
-                        lineage_id=lid,
-                        version=kwargs.get("version"),
-                    )
-                )
-            return results
-
-        mock_bt.side_effect = side_effect
-        db = MagicMock()
-        result = select_candidates(db, dry_run=True)
-        self.assertEqual(len(result.selected_lineage_ids), TOP_K)
-        self.assertIn("c0", result.selected_lineage_ids)
-        self.assertIn("c1", result.selected_lineage_ids)
-        self.assertIn("c2", result.selected_lineage_ids)
-        self.assertNotIn("c3", result.selected_lineage_ids)
 
 
 class EvaluatorTests(unittest.TestCase):

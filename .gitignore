@@ -5,4 +5,4 @@ tools/seed_demo_data.py
 __pycache__/
 .venv/
 venv/
-
+paxel.sh

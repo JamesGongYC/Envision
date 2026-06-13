@@ -1,4 +1,4 @@
-"""Cross-window backtest selector: advance top-K candidates to shadow status."""
+"""Selector: advance validated candidates to shadow via light viability gate."""
 from __future__ import annotations
 
 import argparse
@@ -18,7 +18,8 @@ for p in (str(REPO_ROOT), str(AGENT_LIB)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from agent.evolution.backtest_harness import backtest_skill  # noqa: E402
+from agent.evolution.backtest_harness import SKILL_CADENCE, backtest_skill  # noqa: E402
+from agent.evolution.constants import BACKTEST_EPOCH  # noqa: E402
 from agent.evolution.skill_loader import (  # noqa: E402
     load_run_from_source,
     load_skill_run,
@@ -30,10 +31,11 @@ from agent.lib.scoring import PRE_BUFFER_HOURS, POST_BUFFER_HOURS, class_aliases
 log = logging.getLogger(__name__)
 
 NOISE_FLOOR = 0.03
-TOP_K = 3
 MIN_WINDOWS = 3
 MIN_GT_EVALS = 10
 MIN_FORECASTS_EMITTED = 1
+PARENT_SPAM_MULTIPLIER = 3
+MIN_GT_FOR_PATHOLOGY = MIN_GT_EVALS * MIN_WINDOWS
 
 SKILL_DISASTER_CLASS: dict[str, str] = {
     "wildfire_risk_elevated": "wildfire",
@@ -64,6 +66,23 @@ def _disaster_class(skill_id: str) -> str:
     if not d:
         raise KeyError(f"no disaster class mapping for {skill_id!r}")
     return d
+
+
+def _count_gt_post_epoch(db: Connection, skill_id: str) -> int:
+    dclass = _disaster_class(skill_id)
+    aliases = list(class_aliases(dclass))
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COUNT(*)::int
+            FROM ground_truth
+            WHERE disaster_class = ANY(%s)
+              AND occurred_at IS NOT NULL
+              AND occurred_at >= %s
+            """,
+            (aliases, BACKTEST_EPOCH),
+        )
+        return int(cur.fetchone()[0])
 
 
 def _count_gt_in_window(
@@ -102,8 +121,9 @@ def build_disjoint_windows(
             FROM ground_truth
             WHERE disaster_class = ANY(%s)
               AND occurred_at IS NOT NULL
+              AND occurred_at >= %s
             """,
-            (aliases,),
+            (aliases, BACKTEST_EPOCH),
         )
         row = cur.fetchone()
 
@@ -153,6 +173,30 @@ def build_disjoint_windows(
     return windows
 
 
+def build_viability_window(
+    db: Connection,
+    skill_id: str,
+    *,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime] | None:
+    """One cadence tick at the latest signal time — fast emit check vs parent."""
+    from agent.evolution.skill_validator import _pick_smoke_time
+
+    now = now or datetime.now(timezone.utc)
+    if skill_id not in SKILL_CADENCE:
+        return None
+    t = _pick_smoke_time(db, now)
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    if t < BACKTEST_EPOCH:
+        t = BACKTEST_EPOCH
+    step = SKILL_CADENCE[skill_id]
+    t_end = t + step
+    if t_end <= t:
+        return None
+    return t, t_end
+
+
 def load_pending_candidates(db: Connection) -> list[CandidateRow]:
     with db.cursor() as cur:
         cur.execute(
@@ -195,18 +239,67 @@ def load_parent_lineage(db: Connection, skill_id: str) -> tuple[str, str] | None
     return str(row[0]), row[1]
 
 
-def _evaluate_candidate(
+def _compare_emissions(parent_n: int, cand_n: int) -> list[str]:
+    reasons: list[str] = []
+    if cand_n < MIN_FORECASTS_EMITTED:
+        reasons.append("candidate emitted 0 forecasts on window")
+    cap = PARENT_SPAM_MULTIPLIER * max(1, parent_n)
+    if cand_n > cap:
+        reasons.append(
+            f"forecast spam: {cand_n} > {cap} (parent emitted {parent_n})"
+        )
+    return reasons
+
+
+def _viability_gate(
     db: Connection,
     cand: CandidateRow,
-    windows: list[tuple[datetime, datetime]],
+    window: tuple[datetime, datetime],
     parent_lineage_id: str | None,
-) -> tuple[bool, float, list[str]]:
-    """Return (qualified, mean_improvement, rejection_reasons)."""
+) -> tuple[bool, list[str]]:
+    """Light gate: emit >0 and within 3x parent volume on one cadence tick."""
+    del parent_lineage_id
+    from unittest.mock import patch
+
+    from agent.evolution.backtest_connection import BacktestConnection
+    from agent.evolution.backtest_harness import _backtest_llm_guard, _blocked_execute
+
+    t = window[0]
     surface = normalize_mutation_surface(cand.source_code)
     candidate_run = load_run_from_source(surface, cand.skill_id)
     parent_run = load_skill_run(cand.skill_id)
 
-    improvements: list[float] = []
+    try:
+        with _backtest_llm_guard(), patch.object(
+            psycopg.Cursor, "execute", _blocked_execute
+        ):
+            db_parent = BacktestConnection(db, cand.skill_id, t)
+            db_cand = BacktestConnection(db, cand.skill_id, t)
+            parent_out = parent_run(t, db_parent)
+            cand_out = candidate_run(t, db_cand)
+    except Exception as exc:
+        return False, [f"viability run failed: {type(exc).__name__}: {exc}"]
+    finally:
+        db.rollback()
+
+    if not isinstance(cand_out, list):
+        return False, ["run() must return a list"]
+    parent_n = len(parent_out) if isinstance(parent_out, list) else 0
+    reasons = _compare_emissions(parent_n, len(cand_out))
+    return len(reasons) == 0, reasons
+
+
+def _pathology_filter(
+    db: Connection,
+    cand: CandidateRow,
+    windows: list[tuple[datetime, datetime]],
+    parent_lineage_id: str | None,
+) -> tuple[bool, list[str]]:
+    """Reject zero-emit or spammy candidates across cross-windows (no Brier ranking)."""
+    surface = normalize_mutation_surface(cand.source_code)
+    candidate_run = load_run_from_source(surface, cand.skill_id)
+    parent_run = load_skill_run(cand.skill_id)
+
     total_emitted = 0
     reasons: list[str] = []
 
@@ -229,32 +322,24 @@ def _evaluate_candidate(
         )
         if not parent_rows or not cand_rows:
             reasons.append(f"backtest failed for window {ws.isoformat()}")
-            return False, 0.0, reasons
+            return False, reasons
 
-        p_brier = parent_rows[0].brier_score
-        c_brier = cand_rows[0].brier_score
+        window_reasons = _compare_emissions(
+            parent_rows[0].forecasts_emitted,
+            cand_rows[0].forecasts_emitted,
+        )
+        if window_reasons:
+            reasons.extend(
+                [f"window {ws.date()}–{we.date()}: {r}" for r in window_reasons]
+            )
+            return False, reasons
         total_emitted += cand_rows[0].forecasts_emitted
-
-        if p_brier is None or c_brier is None:
-            reasons.append(
-                f"null brier in window {ws.date()}–{we.date()}"
-            )
-            return False, 0.0, reasons
-
-        imp = p_brier - c_brier
-        if imp < NOISE_FLOOR:
-            reasons.append(
-                f"window {ws.date()}–{we.date()}: improvement {imp:.4f} < {NOISE_FLOOR}"
-            )
-            return False, 0.0, reasons
-        improvements.append(imp)
 
     if total_emitted < MIN_FORECASTS_EMITTED:
         reasons.append("candidate emitted 0 forecasts across all windows")
-        return False, 0.0, reasons
+        return False, reasons
 
-    mean_imp = sum(improvements) / len(improvements)
-    return True, mean_imp, reasons
+    return True, reasons
 
 
 def select_candidates(
@@ -262,42 +347,49 @@ def select_candidates(
     *,
     dry_run: bool = False,
 ) -> SelectionResult:
-    """Rank pending candidates; promote top-K to shadow status."""
+    """Advance pending candidates that pass viability (and optional pathology filter)."""
     candidates = load_pending_candidates(db)
     result = SelectionResult()
 
     if not candidates:
-        log.info("no pending candidates")
+        log.info("[selector] no candidates, exiting")
         return result
 
     by_skill: dict[str, list[CandidateRow]] = {}
     for c in candidates:
         by_skill.setdefault(c.skill_id, []).append(c)
 
-    qualifiers: list[tuple[float, CandidateRow]] = []
+    selected: list[str] = []
 
     for skill_id, skill_cands in by_skill.items():
-        windows = build_disjoint_windows(db, skill_id)
-        if len(windows) < MIN_WINDOWS:
+        viability_window = build_viability_window(db, skill_id)
+        if viability_window is None:
             for c in skill_cands:
-                result.rejections[c.lineage_id] = [
-                    "insufficient ground truth for cross-window selection"
-                ]
+                result.rejections[c.lineage_id] = ["invalid viability window span"]
             continue
-
-        if not result.windows:
-            result.windows = windows
 
         parent = load_parent_lineage(db, skill_id)
         parent_lineage_id = parent[0] if parent else None
 
-        for cand in skill_cands:
-            ok, mean_imp, reasons = _evaluate_candidate(
-                db, cand, windows, parent_lineage_id
+        gt_total = _count_gt_post_epoch(db, skill_id)
+        pathology_windows: list[tuple[datetime, datetime]] = []
+        if gt_total >= MIN_GT_FOR_PATHOLOGY:
+            pathology_windows = build_disjoint_windows(db, skill_id)
+            if len(pathology_windows) >= MIN_WINDOWS and not result.windows:
+                result.windows = pathology_windows
+        else:
+            log.info(
+                "insufficient ground truth for cross-window pathology filter "
+                f"(have {gt_total}, need {MIN_GT_FOR_PATHOLOGY}); "
+                "viability gate only for %s",
+                skill_id,
             )
-            if ok:
-                qualifiers.append((mean_imp, cand))
-            else:
+
+        for cand in skill_cands:
+            ok, reasons = _viability_gate(
+                db, cand, viability_window, parent_lineage_id
+            )
+            if not ok:
                 result.rejections[cand.lineage_id] = reasons
                 log.info(
                     "rejected %s lineage=%s: %s",
@@ -305,10 +397,30 @@ def select_candidates(
                     cand.lineage_id[:8],
                     reasons,
                 )
+                continue
 
-    qualifiers.sort(key=lambda x: x[0], reverse=True)
-    top = qualifiers[:TOP_K]
-    result.selected_lineage_ids = [c.lineage_id for _, c in top]
+            if len(pathology_windows) >= MIN_WINDOWS:
+                ok, reasons = _pathology_filter(
+                    db, cand, pathology_windows, parent_lineage_id
+                )
+                if not ok:
+                    result.rejections[cand.lineage_id] = reasons
+                    log.info(
+                        "rejected %s lineage=%s: %s",
+                        skill_id,
+                        cand.lineage_id[:8],
+                        reasons,
+                    )
+                    continue
+
+            selected.append(cand.lineage_id)
+            log.info(
+                "selected %s lineage=%s for shadow",
+                skill_id,
+                cand.lineage_id[:8],
+            )
+
+    result.selected_lineage_ids = selected
 
     if dry_run:
         log.info(
@@ -342,7 +454,7 @@ def main() -> int:
     load_repo_env()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    p = argparse.ArgumentParser(description="Select top-K candidates for shadow deploy")
+    p = argparse.ArgumentParser(description="Select candidates for shadow deploy")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 

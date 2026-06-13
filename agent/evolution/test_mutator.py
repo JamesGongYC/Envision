@@ -206,6 +206,35 @@ class ValidatorIntegrationTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertFalse(report.accepted)
         self.assertTrue(any(s["stage"] == "sandbox" and not s["passed"] for s in report.stages))
+        self.assertTrue(
+            any("RuntimeError: boom" in r for r in report.rejection_reasons)
+        )
+
+    def test_sandbox_blocks_insert(self):
+        writer = (
+            "from datetime import datetime\n"
+            "from psycopg import Connection\n"
+            "from forecast_model import Forecast\n"
+            "def run(now: datetime, db: Connection) -> list[Forecast]:\n"
+            "    with db.cursor() as cur:\n"
+            "        cur.execute('INSERT INTO signals (id) VALUES (%s)', ('00000000-0000-0000-0000-000000000001',))\n"
+            "    return []\n"
+        )
+        before = self._counts()
+        report = validate_candidate(
+            writer,
+            "def run(now, db):\n    return []\n",
+            SKILL_ID,
+            self.inventory,
+            self.db,
+            self.now,
+        )
+        after = self._counts()
+        self.assertEqual(before, after)
+        self.assertFalse(report.accepted)
+        self.assertTrue(
+            any(s["stage"] == "no_persistence" and not s["passed"] for s in report.stages)
+        )
 
     def test_no_writes_from_validation_runs(self):
         noop_variant = self.parent.replace("LOOKBACK_HOURS = 24", "LOOKBACK_HOURS = 25", 1)

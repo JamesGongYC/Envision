@@ -544,10 +544,6 @@ def mutate_skill(
     ctb.set_validation_stages(report.stages)
     for reason in report.rejection_reasons:
         ctb.add_rejection_reason(reason)
-    if report.sandbox_traceback:
-        ctb.add_rejection_reason(
-            f"sandbox_traceback: {report.sandbox_traceback[:500]}"
-        )
 
     ctb.set_ast_validation(
         passed=report.accepted,

@@ -21,4 +21,5 @@ def build_aifs_image(*, skill_dir: str, shared_dir: str) -> modal.Image:
         )
         .add_local_dir(skill_dir, remote_path="/root/skill")
         .add_local_dir(shared_dir, remote_path="/root/shared")
+        .add_local_python_source("image")
     )

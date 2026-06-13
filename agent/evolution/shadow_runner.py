@@ -72,8 +72,13 @@ def run_shadow_bucket(
     db: Connection,
 ) -> int:
     """Run all shadow lineages matching this cadence bucket."""
+    lineages = _load_shadow_lineages(db)
+    if not lineages:
+        print("[shadow] no candidates, exiting")
+        return 0
+
     total = 0
-    for lineage_id, skill_id, source_code in _load_shadow_lineages(db):
+    for lineage_id, skill_id, source_code in lineages:
         if SKILL_CADENCE.get(skill_id) != cadence:
             continue
         run_fn = load_run_from_source(source_code, skill_id)

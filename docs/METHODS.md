@@ -135,7 +135,7 @@ Once daily (04:00 UTC), the Curator orchestrates the **automatic** half of the e
 
 1. **Pick worst-K** (K=3) detection skills by 14-day live Brier; tie-break by version spread.
 2. **Mutate** — Sonnet/Haiku rewrites the skill surface; seven-stage validation (AST, signature lock, no-persistence, signal catalog, import allowlist, sandbox).
-3. **Select** — cross-window backtest on ≥3 disjoint GT windows; candidate must beat parent by ≥0.03 Brier in **every** window; top-3 advance to `status='shadow'`.
+3. **Select** — cross-window backtest on ≥3 disjoint GT windows with `occurred_at >= BACKTEST_EPOCH` (2026-06-04 UTC); windows starting before that epoch are rejected. Candidate must beat parent by ≥0.03 Brier in **every** window; top-3 advance to `status='shadow'`.
 4. **Shadow run** — generic shadow-runner cron executes candidates into `forecasts_shadow` (public map never sees these).
 5. **Shadow evaluate** — forecast-evaluator writes `shadow_evaluations`.
 
@@ -157,7 +157,11 @@ operator: python -m modal deploy agent/modal_skills/<skill>/app.py
 
 **Deferred:** de-novo generator (v3.1), diversity penalty in selector, tiered auto-approve for parametric edits.
 
-Implementation: [`agent/evolution/orchestrator.py`](../agent/evolution/orchestrator.py), [`agent/modal_skills/curator/run.py`](../agent/modal_skills/curator/run.py). v2 param-tweak curator archived at `_archived_v2_param_tweak.py`.
+Implementation: [`agent/evolution/orchestrator.py`](../agent/evolution/orchestrator.py), [`agent/evolution/constants.py`](../agent/evolution/constants.py) (`BACKTEST_EPOCH`), [`agent/modal_skills/curator/run.py`](../agent/modal_skills/curator/run.py). v2 param-tweak curator archived at `_archived_v2_param_tweak.py`.
+
+**Ground truth dedup:** GDACS events upsert on `(source, payload.eventid)`; advisory updates refresh payload/geometry without duplicating rows or moving `occurred_at`. Rows without `eventid` keep md5 payload dedup from migration 002.
+
+**Backtest misses:** `_score_window` counts unmatched ground-truth rows per window (not per-forecast false positives). Run `tools/purge_seed_data.py` before applying migration 009; record `wildfire_rapid_growth` 14d Brier before/after purge in deploy notes.
 
 ## 6. Approval workflow
 
