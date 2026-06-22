@@ -155,9 +155,21 @@ operator: python -m modal deploy agent/modal_skills/<skill>/app.py
 
 `promote` writes `agent/modal_skills/<skill>/run.py` and updates DB lineage — but **does not** run Modal deploy. No evolution cron writes production files.
 
-**Deferred:** de-novo generator (v3.1), diversity penalty in selector, tiered auto-approve for parametric edits.
+**Deferred:** diversity penalty in selector, tiered auto-approve for parametric edits.
 
-Implementation: [`agent/evolution/orchestrator.py`](../agent/evolution/orchestrator.py), [`agent/evolution/constants.py`](../agent/evolution/constants.py) (`BACKTEST_EPOCH`), [`agent/modal_skills/curator/run.py`](../agent/modal_skills/curator/run.py). v2 param-tweak curator archived at `_archived_v2_param_tweak.py`.
+### v3.2 — LLM status layer + generator
+
+All Anthropic HTTP traffic routes through [`agent/lib/llm_client.py`](../agent/lib/llm_client.py) (`mutator`, `generator`, `narrator`, `probe`). Each attempt logs one row to `llm_call_log` (migration 011) with `call_group_id`, `request_id`, and token counts.
+
+**Health gate** ([`agent/lib/health_gate.py`](../agent/lib/health_gate.py)): pre-flight probe at curator entry; rolling 10-minute 529-rate abort mid-cycle (`min_samples=5`, threshold 0.5). Independent of `ENVISION_CURATOR_ENABLED`.
+
+**Generator** ([`agent/evolution/generator.py`](../agent/evolution/generator.py)): operator-seeded via `ENVISION_GENERATOR_ENABLED` + `ENVISION_GENERATOR_DISASTER_CLASS` (+ optional `ENVISION_GENERATOR_PROMPT`). Fires only when uncovered signal types exist for that class — not on the daily worst-K tick. Writes `generation_method='generated'`, `parent_skill_id=NULL` lineage rows; `app.py` scaffold stored in `skill_md` until human promote.
+
+**Generated promotion bar (A1):** `shadow_brier < base_rate_brier − 0.03` at N≥20 — absolute base-rate comparison, no parent incumbent. Mutant path unchanged (parent 14d Brier).
+
+**Load control (A2↔A3):** generator is condition-gated and operator-seeded; no per-parent child cap.
+
+Implementation: [`agent/evolution/orchestrator.py`](../agent/evolution/orchestrator.py), [`agent/evolution/generation_trigger.py`](../agent/evolution/generation_trigger.py), [`agent/modal_skills/curator/run.py`](../agent/modal_skills/curator/run.py). v2 param-tweak curator archived at `_archived_v2_param_tweak.py`.
 
 **Ground truth dedup:** GDACS events upsert on `(source, payload.eventid)`; advisory updates refresh payload/geometry without duplicating rows or moving `occurred_at`. Rows without `eventid` keep md5 payload dedup from migration 002.
 

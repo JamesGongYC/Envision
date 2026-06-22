@@ -719,3 +719,28 @@ Layer prefs key: `envision.layers.v31`.
 **Deps added:** `@xyflow/react`, `@dagrejs/dagre`.
 
 **Deploy:** Vercel Root Directory `viewer/`; `DATABASE_URL` required in all envs.
+
+---
+
+## v3.2 — Generator + LLM-API status layer (2026-06-21)
+
+### Shipped in repo
+
+- [`agent/lib/llm_client.py`](../agent/lib/llm_client.py) — shared wrapper (429 retry-after, 529/5xx backoff, model-tier fallback, `llm_call_log` telemetry)
+- [`agent/lib/health_gate.py`](../agent/lib/health_gate.py) — preflight probe + rolling 529 gate
+- [`agent/evolution/generator.py`](../agent/evolution/generator.py) — de-novo skill generation
+- [`agent/evolution/generation_trigger.py`](../agent/evolution/generation_trigger.py) — operator-seeded A2 trigger
+- [`agent/evolution/base_rate.py`](../agent/evolution/base_rate.py) — generated-skill promotion bar
+- [`db/migrations/011_llm_call_log.sql`](../db/migrations/011_llm_call_log.sql) — **apply on Neon before deploy**
+- `/agent` LLM API health indicator (10m window from `llm_call_log`)
+
+### Operator steps
+
+1. Apply migration 011 on Neon.
+2. Redeploy `curator` Modal app (ships new evolution + lib code).
+3. Optional generator run: set on Modal secret `ENVISION_GENERATOR_ENABLED=true`, `ENVISION_GENERATOR_DISASTER_CLASS=wildfire|typhoon`, optional `ENVISION_GENERATOR_PROMPT=...`; trigger curator manually or wait for 04:00 UTC cron.
+4. Redeploy Vercel viewer for `/agent` LLM indicator.
+
+### Schema note
+
+`skill_lineage.generation_method` + `parent_skill_id` present since migration 006 — **no migration 012**.

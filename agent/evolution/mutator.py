@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-from anthropic import Anthropic
 from psycopg import Connection
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -33,11 +32,12 @@ from agent.evolution.skill_surface import (  # noqa: E402
     normalize_mutation_surface,
 )
 from agent.evolution.skill_validator import ValidationReport, validate_candidate  # noqa: E402
+from agent.lib.llm_client import DEFAULT_HAIKU, call_messages  # noqa: E402
 from agent.lib.repo_env import load_repo_env  # noqa: E402
 from trace_builder import CuratorTraceBuilder  # noqa: E402
 
 SONNET_MODEL = os.environ.get("ENVISION_MUTATOR_MODEL", "claude-sonnet-4-6")
-HAIKU_MODEL = os.environ.get("ENVISION_MUTATOR_FALLBACK_MODEL", "claude-3-5-haiku-latest")
+HAIKU_MODEL = os.environ.get("ENVISION_MUTATOR_FALLBACK_MODEL", DEFAULT_HAIKU)
 MAX_TOKENS = 16384
 MAX_ATTEMPTS = 3
 
@@ -292,58 +292,43 @@ def _serialize_response(response) -> str:
 
 
 def call_mutation_llm(
-    client: Anthropic,
+    db: Connection,
     user_prompt: str,
     *,
     prefer_haiku: bool = False,
     budget: BudgetTracker | None = None,
 ) -> tuple[str, str, list[str], object, str]:
     """Returns (mutated_source, rationale, targets, response, model_used)."""
-    if budget is not None and not budget.can_afford_next_call():
-        raise RuntimeError("evolution pass budget exhausted")
-
-    models = (
-        (HAIKU_MODEL, SONNET_MODEL) if prefer_haiku else (SONNET_MODEL, HAIKU_MODEL)
+    primary = HAIKU_MODEL if prefer_haiku else SONNET_MODEL
+    fallback = SONNET_MODEL if prefer_haiku else HAIKU_MODEL
+    response, model_used = call_messages(
+        call_site="mutator",
+        db=db,
+        messages=[{"role": "user", "content": user_prompt}],
+        model=primary,
+        fallback_model=fallback,
+        max_tokens=MAX_TOKENS,
+        system=SYSTEM_PROMPT,
+        tools=[MUTATION_TOOL],
+        tool_choice={"type": "tool", "name": "propose_skill_mutation"},
+        budget=budget,
     )
-    last_err: Exception | None = None
-    for model in models:
-        try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=MAX_TOKENS,
-                system=SYSTEM_PROMPT,
-                tools=[MUTATION_TOOL],
-                tool_choice={"type": "tool", "name": "propose_skill_mutation"},
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-            usage = getattr(response, "usage", None)
-            if budget is not None:
-                budget.record_usage(
-                    model,
-                    getattr(usage, "input_tokens", None) if usage else None,
-                    getattr(usage, "output_tokens", None) if usage else None,
-                )
-            tool_block = next(
-                (b for b in response.content if b.type == "tool_use"), None
-            )
-            if tool_block is None:
-                raise RuntimeError("no tool_use block in response")
-            inp = tool_block.input
-            targets = inp.get("targets") or []
-            if isinstance(targets, str):
-                targets = [targets]
-            return (
-                inp["mutated_source"],
-                inp["rationale"],
-                list(targets),
-                response,
-                model,
-            )
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            if model == models[-1]:
-                raise
-    raise RuntimeError(f"LLM failed: {last_err}")
+    tool_block = next(
+        (b for b in response.content if b.type == "tool_use"), None
+    )
+    if tool_block is None:
+        raise RuntimeError("no tool_use block in response")
+    inp = tool_block.input
+    targets = inp.get("targets") or []
+    if isinstance(targets, str):
+        targets = [targets]
+    return (
+        inp["mutated_source"],
+        inp["rationale"],
+        list(targets),
+        response,
+        model_used,
+    )
 
 
 def persist_accepted(
@@ -424,16 +409,12 @@ def mutate_skill(
             rejection_reasons=["signal_catalog empty — refresh materialized view"],
         )
 
-    client: Anthropic | None = None
     db_url = os.environ.get("DATABASE_URL")
-    if llm_fn is None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            return MutationResult(
-                accepted=False,
-                rejection_reasons=["ANTHROPIC_API_KEY not set"],
-            )
-        client = Anthropic(api_key=api_key)
+    if llm_fn is None and not os.environ.get("ANTHROPIC_API_KEY"):
+        return MutationResult(
+            accepted=False,
+            rejection_reasons=["ANTHROPIC_API_KEY not set"],
+        )
 
     ctb = CuratorTraceBuilder()
     ctb.set_brier_stats({
@@ -481,13 +462,12 @@ def mutate_skill(
                     user_prompt
                 )
             else:
-                assert client is not None
                 prefer_haiku = budget.should_use_haiku() if budget else False
                 if prefer_haiku and budget:
                     budget.note_haiku_fallback()
                 mutated_surface, rationale, targets, response, model_used = (
                     call_mutation_llm(
-                        client,
+                        db,
                         user_prompt,
                         prefer_haiku=prefer_haiku,
                         budget=budget,

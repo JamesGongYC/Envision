@@ -416,7 +416,7 @@ def run(now: datetime, db: Connection) -> list[Forecast]:
             top_names,
             float(HORIZON_HOURS),
         )
-        reasoning = generate_reasoning(prompt, fallback)
+        reasoning = generate_reasoning(prompt, fallback, db=db)
 
         out.append(
             Forecast(

@@ -30,6 +30,54 @@ export interface ProposalRow {
   curator_reasoning: string;
 }
 
+export interface LlmApiHealth {
+  attempts: number;
+  successes: number;
+  overloaded: number;
+  overloaded_rate: number;
+  signal_catalog_stalest_hours: number | null;
+}
+
+export async function getLlmApiHealth(
+  windowMinutes = 10
+): Promise<LlmApiHealth | null> {
+  try {
+    const rows = await sql`
+      SELECT
+        count(*)::int AS attempts,
+        count(*) FILTER (WHERE outcome = 'success')::int AS successes,
+        count(*) FILTER (WHERE status_code = 529)::int AS overloaded,
+        coalesce(
+          count(*) FILTER (WHERE status_code = 529)::float
+            / NULLIF(count(*), 0),
+          0
+        ) AS overloaded_rate
+      FROM llm_call_log
+      WHERE created_at >= now() - (${windowMinutes} * interval '1 minute')
+    `;
+    const staleRows = await sql`
+      SELECT EXTRACT(EPOCH FROM (now() - MIN(last_seen))) / 3600.0 AS stalest_hours
+      FROM signal_catalog
+    `;
+    const row = rows[0] as {
+      attempts: number;
+      successes: number;
+      overloaded: number;
+      overloaded_rate: number;
+    };
+    const stale = staleRows[0] as { stalest_hours: number | null };
+    return {
+      attempts: row.attempts,
+      successes: row.successes,
+      overloaded: row.overloaded,
+      overloaded_rate: row.overloaded_rate,
+      signal_catalog_stalest_hours: stale?.stalest_hours ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function getSystemStatus(): Promise<SystemStatus> {
   const rows = await sql`
     SELECT

@@ -1,5 +1,6 @@
 import {
   buildSkillCards,
+  getLlmApiHealth,
   getRecentProposals,
   getSystemStatus,
 } from '@/lib/agent-queries';
@@ -46,15 +47,37 @@ function StatusPill({
   );
 }
 
+function llmHealthLabel(
+  health: Awaited<ReturnType<typeof getLlmApiHealth>>
+): { text: string; state: 'on' | 'off' | 'neutral' } {
+  if (!health || health.attempts === 0) {
+    return { text: 'No recent calls', state: 'neutral' };
+  }
+  if (health.overloaded_rate >= 0.5 && health.attempts >= 5) {
+    return {
+      text: `Degraded (${health.overloaded}×529 / ${health.attempts})`,
+      state: 'off',
+    };
+  }
+  const pct = Math.round((health.successes / health.attempts) * 100);
+  return { text: `Healthy (${pct}% ok)`, state: 'on' };
+}
+
 export default async function AgentPage() {
-  const [status, skillCards, proposals] = await Promise.all([
+  const [status, skillCards, proposals, llmHealth] = await Promise.all([
     getSystemStatus(),
     buildSkillCards(),
     getRecentProposals(10),
+    getLlmApiHealth(),
   ]);
 
   const curatorEnabled = isCuratorEnabled();
   const pendingProposals = proposals.filter((p) => p.status === 'pending');
+  const llmStatus = llmHealthLabel(llmHealth);
+  const signalStale =
+    llmHealth?.signal_catalog_stalest_hours != null
+      ? `${Math.round(llmHealth.signal_catalog_stalest_hours)}h since oldest source`
+      : undefined;
 
   return (
     <div className="container mx-auto px-4 py-6 max-w-5xl space-y-10">
@@ -69,7 +92,7 @@ export default async function AgentPage() {
         <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">
           System status
         </h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <Stat
             label="Curator mutation (Vercel env)"
             value={
@@ -78,6 +101,16 @@ export default async function AgentPage() {
                 {curatorEnabled ? 'Enabled' : 'Halted'}
               </span>
             }
+          />
+          <Stat
+            label="LLM API (10m)"
+            value={
+              <span className="flex items-center gap-1.5 text-slate-800">
+                <StatusPill state={llmStatus.state} />
+                {llmStatus.text}
+              </span>
+            }
+            sub={signalStale}
           />
           <Stat
             label="Active forecasts"

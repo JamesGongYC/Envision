@@ -45,6 +45,18 @@ def run(now: datetime, db: Connection) -> dict:
         )
         wind_fields_deleted = cur.rowcount
 
+        llm_log_deleted = 0
+        try:
+            cur.execute("SAVEPOINT llm_retention")
+            cur.execute(
+                "DELETE FROM llm_call_log WHERE created_at < %s - interval '30 days'",
+                (now,),
+            )
+            llm_log_deleted = cur.rowcount
+            cur.execute("RELEASE SAVEPOINT llm_retention")
+        except Exception:  # noqa: BLE001 — table may not exist pre-migration 011
+            cur.execute("ROLLBACK TO SAVEPOINT llm_retention")
+
         cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY signal_catalog")
 
     db.commit()
@@ -52,10 +64,12 @@ def run(now: datetime, db: Connection) -> dict:
         "signals_deleted": signals_deleted,
         "forecasts_deleted": forecasts_deleted,
         "wind_fields_deleted": wind_fields_deleted,
+        "llm_log_deleted": llm_log_deleted,
     }
     print(
         f"[{SKILL_ID}] deleted {signals_deleted} signals, "
-        f"{forecasts_deleted} forecasts, {wind_fields_deleted} wind_fields; "
+        f"{forecasts_deleted} forecasts, {wind_fields_deleted} wind_fields, "
+        f"{llm_log_deleted} llm_call_log rows; "
         "refreshed signal_catalog."
     )
     return result

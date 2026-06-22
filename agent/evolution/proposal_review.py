@@ -10,11 +10,13 @@ from typing import Any
 
 from psycopg import Connection
 
+from agent.evolution.base_rate import base_rate_brier  # noqa: E402
 from agent.evolution.mutator import load_parent_surface
 from agent.evolution.promotion import (
     MIN_SHADOW_EVALS,
     modal_deploy_command,
     write_promoted_run_py,
+    write_promoted_skill_bundle,
 )
 from agent.evolution.selector import NOISE_FLOOR
 from agent.evolution.shadow_stats import fetch_shadow_brier_by_lineage
@@ -34,6 +36,8 @@ class ProposalRow:
     source_code: str | None
     curator_reasoning: str | None
     curator_trace: dict | None
+    generation_method: str | None = None
+    skill_md: str | None = None
 
 
 def _resolve_proposal(cur, prefix: str) -> tuple | None:
@@ -41,7 +45,7 @@ def _resolve_proposal(cur, prefix: str) -> tuple | None:
         """
         SELECT p.id, p.skill_id, p.current_version, p.status, p.proposed_at,
                p.curator_reasoning, p.curator_trace, p.lineage_id,
-               l.status, l.source_code
+               l.status, l.source_code, l.generation_method, l.skill_md
         FROM skill_edit_proposals p
         LEFT JOIN skill_lineage l ON l.id = p.lineage_id
         WHERE p.id::text LIKE %s
@@ -74,6 +78,8 @@ def fetch_proposal(db: Connection, proposal_id_prefix: str) -> ProposalRow | Non
         lineage_id=str(row[7]) if row[7] else None,
         lineage_status=row[8],
         source_code=row[9],
+        generation_method=row[10],
+        skill_md=row[11],
     )
 
 
@@ -120,6 +126,18 @@ def backtest_summary(db: Connection, lineage_id: str | None) -> list[tuple]:
         return cur.fetchall()
 
 
+def _lineage_generation_method(db: Connection, lineage_id: str | None) -> str | None:
+    if not lineage_id:
+        return None
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT generation_method FROM skill_lineage WHERE id = %s",
+            (lineage_id,),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def blocked_on(db: Connection, proposal: ProposalRow) -> list[str]:
     reasons: list[str] = []
     if proposal.status != "pending":
@@ -134,18 +152,41 @@ def blocked_on(db: Connection, proposal: ProposalRow) -> list[str]:
         reasons.append("windows: insufficient ground truth")
 
     shadow_brier, n_evals = shadow_metrics(db, proposal.lineage_id)
+    gen_method = proposal.generation_method or _lineage_generation_method(
+        db, proposal.lineage_id
+    )
+
     if proposal.lineage_status == "shadow":
         if n_evals < MIN_SHADOW_EVALS:
             reasons.append(f"evals {n_evals}/{MIN_SHADOW_EVALS}")
-        parent_brier = parent_live_brier_14d(db, proposal.skill_id)
-        if shadow_brier is not None and parent_brier is not None:
-            if shadow_brier > parent_brier - NOISE_FLOOR:
-                reasons.append(
-                    f"shadow brier {shadow_brier:.3f} vs parent {parent_brier:.3f} "
-                    f"(need −{NOISE_FLOOR})"
+        elif gen_method == "generated":
+            try:
+                from agent.evolution.skill_metadata import parse_disaster_class
+
+                dclass = parse_disaster_class(
+                    proposal.source_code or "", proposal.skill_id
                 )
-        elif n_evals >= MIN_SHADOW_EVALS:
-            reasons.append("shadow or parent brier unavailable")
+            except KeyError:
+                dclass = "wildfire"
+            br = base_rate_brier(db, dclass)
+            if shadow_brier is not None and br is not None:
+                if shadow_brier > br - NOISE_FLOOR:
+                    reasons.append(
+                        f"shadow brier {shadow_brier:.3f} vs base-rate {br:.3f} "
+                        f"(need −{NOISE_FLOOR})"
+                    )
+            elif n_evals >= MIN_SHADOW_EVALS:
+                reasons.append("shadow or base-rate brier unavailable")
+        else:
+            parent_brier = parent_live_brier_14d(db, proposal.skill_id)
+            if shadow_brier is not None and parent_brier is not None:
+                if shadow_brier > parent_brier - NOISE_FLOOR:
+                    reasons.append(
+                        f"shadow brier {shadow_brier:.3f} vs parent {parent_brier:.3f} "
+                        f"(need −{NOISE_FLOOR})"
+                    )
+            elif n_evals >= MIN_SHADOW_EVALS:
+                reasons.append("shadow or parent brier unavailable")
 
     if os.environ.get("ENVISION_HARNESS_SANITY") == "fail":
         reasons.append("backtest pending harness")
@@ -157,7 +198,13 @@ def source_diff(
     db: Connection,
     proposal: ProposalRow,
 ) -> str:
-    parent_surface, _ = load_parent_surface(db, proposal.skill_id)
+    if proposal.generation_method == "generated" or not proposal.source_code:
+        candidate = proposal.source_code or ""
+        return f"(generated skill — no parent diff)\n{candidate[:2000]}"
+    try:
+        parent_surface, _ = load_parent_surface(db, proposal.skill_id)
+    except Exception:  # noqa: BLE001
+        parent_surface = ""
     candidate = proposal.source_code or ""
     lines = difflib.unified_diff(
         parent_surface.splitlines(keepends=True),
@@ -178,7 +225,7 @@ def list_proposals(
         cur.execute(
             """
             SELECT p.id, p.skill_id, p.current_version, p.status, p.proposed_at,
-                   p.lineage_id, l.status, p.curator_reasoning
+                   p.lineage_id, l.status, p.curator_reasoning, l.generation_method
             FROM skill_edit_proposals p
             LEFT JOIN skill_lineage l ON l.id = p.lineage_id
             WHERE p.status = %s
@@ -202,9 +249,26 @@ def list_proposals(
             source_code=None,
             curator_reasoning=row[7],
             curator_trace=None,
+            generation_method=row[8],
         )
         shadow_brier, n_evals = shadow_metrics(db, prop.lineage_id)
         parent_brier = parent_live_brier_14d(db, prop.skill_id)
+        base_br = None
+        if prop.generation_method == "generated" and prop.lineage_id:
+            with db.cursor() as cur:
+                cur.execute(
+                    "SELECT source_code FROM skill_lineage WHERE id = %s",
+                    (prop.lineage_id,),
+                )
+                src_row = cur.fetchone()
+            if src_row and src_row[0]:
+                try:
+                    from agent.evolution.skill_metadata import parse_disaster_class
+
+                    dclass = parse_disaster_class(src_row[0], prop.skill_id)
+                    base_br = base_rate_brier(db, dclass)
+                except KeyError:
+                    pass
         bt = backtest_summary(db, prop.lineage_id)
         mean_bt = (
             sum(r[2] for r in bt if r[2] is not None) / len(bt) if bt else None
@@ -219,6 +283,7 @@ def list_proposals(
             "backtest_mean_brier": mean_bt,
             "backtest_windows": len(bt),
             "parent_live_brier_14d": parent_brier,
+            "base_rate_brier": base_br,
             "shadow_brier": shadow_brier,
             "shadow_n_evals": n_evals,
             "blocked_on": blocked_on(db, prop),
@@ -277,18 +342,32 @@ def promote_proposal(
         )
     db.commit()
 
-    path = write_promoted_run_py(
-        proposal.skill_id,
-        proposal.source_code or "",
-        new_version,
-        repo_root=repo_root,
-    )
+    if proposal.generation_method == "generated" and proposal.skill_md:
+        run_path, md_path, app_path = write_promoted_skill_bundle(
+            proposal.skill_id,
+            proposal.source_code or "",
+            proposal.skill_md,
+            new_version,
+            repo_root=repo_root,
+        )
+        msg = (
+            f"Promoted generated {proposal.skill_id} v{new_version}.\n"
+            f"  Wrote: {run_path}\n"
+        )
+        if md_path:
+            msg += f"  Wrote: {md_path}\n"
+        if app_path:
+            msg += f"  Wrote: {app_path}\n"
+    else:
+        path = write_promoted_run_py(
+            proposal.skill_id,
+            proposal.source_code or "",
+            new_version,
+            repo_root=repo_root,
+        )
+        msg = f"Promoted {proposal.skill_id} v{new_version}.\n  Wrote: {path}\n"
     deploy = modal_deploy_command(proposal.skill_id)
-    msg = (
-        f"Promoted {proposal.skill_id} v{new_version}.\n"
-        f"  Wrote: {path}\n"
-        f"  Deploy manually: {deploy}"
-    )
+    msg += f"  Deploy manually: {deploy}"
     return True, msg
 
 

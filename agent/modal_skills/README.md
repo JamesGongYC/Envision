@@ -23,6 +23,16 @@ python -m modal secret create envision-neon \
   FIRMS_MAP_KEY='<firms-map-key>'
 ```
 
+Optional generator (v3.2, operator-seeded — not on daily mutation tick):
+
+```bash
+  ENVISION_GENERATOR_ENABLED=true \
+  ENVISION_GENERATOR_DISASTER_CLASS=wildfire   # or typhoon — one class per run
+  ENVISION_GENERATOR_PROMPT='optional seed text'
+```
+
+Optional LLM health gate tuning: `ENVISION_LLM_GATE_WINDOW_MINUTES`, `ENVISION_LLM_GATE_MIN_SAMPLES`, `ENVISION_LLM_GATE_529_THRESHOLD`.
+
 Optional: `JTWC_USER_AGENT` (browser-like string) if JTWC returns 403 from Modal.
 
 ## Deployed apps (v2.5)

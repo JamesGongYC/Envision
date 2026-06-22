@@ -327,7 +327,7 @@ def run(now: datetime, db: Connection) -> list[Forecast]:
             src_label,
             summary_text,
         )
-        reasoning = generate_reasoning(prompt, fallback)
+        reasoning = generate_reasoning(prompt, fallback, db=db)
 
         out.append(
             Forecast(

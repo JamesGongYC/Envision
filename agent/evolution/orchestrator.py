@@ -18,9 +18,12 @@ for p in (str(REPO_ROOT), str(AGENT_LIB)):
         sys.path.insert(0, p)
 
 from agent.evolution.budget import PASS_BUDGET_USD, BudgetTracker  # noqa: E402
+from agent.evolution.generation_trigger import should_run_generator  # noqa: E402
+from agent.evolution.generator import generate_skill  # noqa: E402
 from agent.evolution.mutator import mutate_skill  # noqa: E402
 from agent.evolution.selector import select_candidates  # noqa: E402
 from agent.evolution.skill_loader import SKILL_FOLDERS  # noqa: E402
+from agent.lib.health_gate import should_abort_cycle  # noqa: E402
 from agent.lib.repo_env import load_repo_env  # noqa: E402
 
 SKILL_ID = "curator"
@@ -118,40 +121,77 @@ def run_evolution_pass(
     now: datetime,
     *,
     budget: BudgetTracker | None = None,
+    curator_enabled: bool = True,
 ) -> PassSummary:
     summary = PassSummary()
     tracker = budget or BudgetTracker()
 
-    if now.weekday() == 0:
-        summary.generator_note = "generator deferred to v3.1"
+    if should_abort_cycle(db):
+        summary.generator_note = "health gate: rolling 529 rate tripped; aborting cycle"
         print(f"[{SKILL_ID}] {summary.generator_note}")
+        summary.budget = tracker.summary()
+        return summary
 
-    targets = pick_worst_k_skills(db, now, WORST_K)
-    summary.targeted = targets
-
-    if not targets:
-        print(f"[{SKILL_ID}] no skills targeted for mutation")
-    else:
-        print(f"[{SKILL_ID}] targeting worst-K: {targets}")
-
-        for skill_id in targets:
-            if not tracker.can_afford_next_call():
-                print(f"[{SKILL_ID}] budget exhausted; stopping before {skill_id}")
-                summary.skipped += 1
-                break
-            summary.mutated += 1
-            print(f"[{SKILL_ID}] mutating {skill_id}...")
-            result = mutate_skill(skill_id, db, now=now, budget=tracker)
-            if result.accepted:
-                summary.accepted += 1
-                print(
-                    f"[{SKILL_ID}] {skill_id}: accepted "
-                    f"proposal={result.proposal_id[:8] if result.proposal_id else '?'}"
+    run_gen, dclass, uncovered = should_run_generator(db)
+    if run_gen and dclass:
+        print(
+            f"[{SKILL_ID}] generator triggered for {dclass} "
+            f"({len(uncovered)} uncovered signal types)"
+        )
+        if should_abort_cycle(db):
+            summary.generator_note = "health gate tripped before generator"
+            print(f"[{SKILL_ID}] {summary.generator_note}")
+        else:
+            gen = generate_skill(
+                db,
+                now,
+                disaster_class=dclass,
+                uncovered=uncovered,
+                budget=tracker,
+            )
+            if gen.accepted and gen.proposal_id:
+                summary.generator_note = (
+                    f"generated {gen.skill_id} proposal={gen.proposal_id[:8]}"
                 )
             else:
-                print(
-                    f"[{SKILL_ID}] {skill_id}: rejected — {result.rejection_reasons}"
+                summary.generator_note = (
+                    f"generator rejected: {gen.rejection_reasons}"
                 )
+            print(f"[{SKILL_ID}] {summary.generator_note}")
+
+    if curator_enabled:
+        targets = pick_worst_k_skills(db, now, WORST_K)
+        summary.targeted = targets
+
+        if not targets:
+            print(f"[{SKILL_ID}] no skills targeted for mutation")
+        else:
+            print(f"[{SKILL_ID}] targeting worst-K: {targets}")
+
+            for skill_id in targets:
+                if should_abort_cycle(db):
+                    print(f"[{SKILL_ID}] health gate tripped; stopping mutation loop")
+                    summary.skipped += 1
+                    break
+                if not tracker.can_afford_next_call():
+                    print(f"[{SKILL_ID}] budget exhausted; stopping before {skill_id}")
+                    summary.skipped += 1
+                    break
+                summary.mutated += 1
+                print(f"[{SKILL_ID}] mutating {skill_id}...")
+                result = mutate_skill(skill_id, db, now=now, budget=tracker)
+                if result.accepted:
+                    summary.accepted += 1
+                    print(
+                        f"[{SKILL_ID}] {skill_id}: accepted "
+                        f"proposal={result.proposal_id[:8] if result.proposal_id else '?'}"
+                    )
+                else:
+                    print(
+                        f"[{SKILL_ID}] {skill_id}: rejected — {result.rejection_reasons}"
+                    )
+    else:
+        print(f"[{SKILL_ID}] curator mutation disabled; skipping worst-K pass")
 
     sel = select_candidates(db, dry_run=False)
     summary.selected_to_shadow = sel.selected_lineage_ids

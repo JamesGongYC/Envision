@@ -9,7 +9,7 @@ HAIKU_SWITCH_FRACTION = 0.7
 # USD per 1M tokens (conservative estimates)
 _MODEL_RATES: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-6": (3.0, 15.0),
-    "claude-3-5-haiku-latest": (0.8, 4.0),
+    "claude-haiku-4-5": (1.0, 5.0),
 }
 _FALLBACK_CALL_USD = 0.25
 

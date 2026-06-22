@@ -325,7 +325,7 @@ def run(now: datetime, db: Connection) -> list[Forecast]:
             float(elapsed_h),
             float(p_now),
         )
-        reasoning = generate_reasoning(prompt, fallback)
+        reasoning = generate_reasoning(prompt, fallback, db=db)
 
         out.append(
             Forecast(

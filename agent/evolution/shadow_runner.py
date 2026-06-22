@@ -20,11 +20,21 @@ for p in (str(REPO_ROOT), str(AGENT_LIB)):
 
 from agent.evolution.backtest_harness import SKILL_CADENCE  # noqa: E402
 from agent.evolution.skill_loader import load_run_from_source  # noqa: E402
+from agent.evolution.skill_metadata import cadence_timedelta  # noqa: E402
 from agent.lib.forecast_model import Forecast  # noqa: E402
 from agent.lib.forecast_writer import emit_forecasts  # noqa: E402
 from agent.lib.repo_env import load_repo_env  # noqa: E402
 
 SHADOW_RATE_LIMIT = 50
+
+
+def _resolve_cadence(skill_id: str, source_code: str) -> timedelta | None:
+    if skill_id in SKILL_CADENCE:
+        return SKILL_CADENCE[skill_id]
+    try:
+        return cadence_timedelta(source_code, skill_id)
+    except KeyError:
+        return None
 
 
 def _load_shadow_lineages(db: Connection) -> list[tuple[str, str, str]]:
@@ -79,7 +89,8 @@ def run_shadow_bucket(
 
     total = 0
     for lineage_id, skill_id, source_code in lineages:
-        if SKILL_CADENCE.get(skill_id) != cadence:
+        skill_cadence = _resolve_cadence(skill_id, source_code)
+        if skill_cadence != cadence:
             continue
         run_fn = load_run_from_source(source_code, skill_id)
         batch = run_fn(now, db)

@@ -495,3 +495,128 @@ def validate_candidate(
 
     report.accepted = True
     return report
+
+
+MINIMAL_PARENT_STUB = '''def run(now, db):
+    return []
+'''
+
+
+def check_generated_metadata(source: str, disaster_class: str) -> tuple[bool, str]:
+    from agent.evolution.skill_metadata import (
+        has_forbidden_bootstrap,
+        parse_cadence_minutes,
+        parse_disaster_class,
+    )
+
+    if has_forbidden_bootstrap(source):
+        return False, "module-level Path(__file__) bootstrap forbidden"
+    try:
+        dc = parse_disaster_class(source, "_generated")
+    except KeyError:
+        return False, "DISASTER_CLASS constant required"
+    if dc != disaster_class:
+        return False, f"DISASTER_CLASS must be {disaster_class!r}, got {dc!r}"
+    try:
+        mins = parse_cadence_minutes(source, "_generated")
+    except KeyError:
+        return False, "SKILL_CADENCE_MINUTES constant required"
+    if mins not in (30, 180):
+        return False, f"SKILL_CADENCE_MINUTES must be 30 or 180, got {mins}"
+    return True, ""
+
+
+def validate_generated_candidate(
+    candidate_source: str,
+    skill_id: str,
+    inventory: set[tuple[str, str]],
+    db: Connection,
+    now: datetime,
+    *,
+    disaster_class: str,
+    run_sandbox: bool = True,
+) -> ValidationReport:
+    """Validation pipeline for de-novo generated skills (no parent surface)."""
+    report = ValidationReport(accepted=False)
+
+    ok, detail = check_generated_metadata(candidate_source, disaster_class)
+    if not _stage(
+        report,
+        "generated_metadata",
+        passed=ok,
+        detail=detail or "ok",
+        reason=f"generated_metadata: {detail}" if not ok else None,
+    ):
+        return report
+
+    ok, errs = validate_python(candidate_source)
+    if not _stage(
+        report,
+        "ast_parse",
+        passed=ok,
+        detail="; ".join(errs) if errs else "ok",
+        reason=f"ast_parse: {errs[0]}" if errs else None,
+    ):
+        return report
+
+    ok, detail = check_signature_lock(candidate_source)
+    if not _stage(
+        report,
+        "signature_lock",
+        passed=ok,
+        detail=detail or "ok",
+        reason=f"signature_lock: {detail}" if not ok else None,
+    ):
+        return report
+
+    ok, detail = check_no_persistence(candidate_source)
+    if not _stage(
+        report,
+        "no_persistence",
+        passed=ok,
+        detail=detail or "ok",
+        reason=f"no_persistence: {detail}" if not ok else None,
+    ):
+        return report
+
+    ok, detail = check_signal_catalog(candidate_source, inventory)
+    if not _stage(
+        report,
+        "signal_catalog",
+        passed=ok,
+        detail=detail or "ok",
+        reason=f"signal_catalog: {detail}" if not ok else None,
+    ):
+        return report
+
+    ok, detail = check_import_allowlist(candidate_source)
+    if not _stage(
+        report,
+        "import_allowlist",
+        passed=ok,
+        detail=detail or "ok",
+        reason=f"import_allowlist: {detail}" if not ok else None,
+    ):
+        return report
+
+    if not run_sandbox:
+        report.accepted = True
+        return report
+
+    ok, detail, tb = sandbox_smoke_run(
+        MINIMAL_PARENT_STUB, candidate_source, skill_id, db, now
+    )
+    report.sandbox_traceback = tb
+    if not ok and tb:
+        report.rejection_reasons.append(f"sandbox_traceback: {tb[:1500]}")
+    if not _stage(
+        report,
+        "sandbox",
+        passed=ok,
+        detail=detail if ok else (tb or detail),
+        reason=f"sandbox: {detail}" if not ok else None,
+    ):
+        return report
+
+    report.accepted = True
+    return report

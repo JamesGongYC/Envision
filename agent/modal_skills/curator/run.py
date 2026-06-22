@@ -2,13 +2,14 @@
 """
 curator — Envision v3 evolution orchestrator (daily).
 
-Once per day (when enabled):
-  1. Pick worst-K detection skills by 14d live Brier.
-  2. mutate_skill() for each → validated candidates.
-  3. select_candidates() → top qualifiers advance to shadow.
-  4. Operator promotes via tools/review_proposals.py promote (human gate).
+Once per day:
+  1. LLM health preflight probe (independent of kill switch).
+  2. Optional operator-seeded generator (ENVISION_GENERATOR_*).
+  3. When enabled: worst-K mutation pass.
+  4. select_candidates() → shadow.
+  5. Operator promotes via tools/review_proposals.py promote (human gate).
 
-Gated by ENVISION_CURATOR_ENABLED. Does not write production skill files.
+Does not write production skill files.
 """
 from __future__ import annotations
 
@@ -32,7 +33,9 @@ for p in (str(_REPO_ROOT), str(_AGENT_ROOT / "lib")):
         sys.path.insert(0, p)
 
 from agent.evolution.budget import BudgetTracker  # noqa: E402
+from agent.evolution.generation_trigger import is_generator_seeded  # noqa: E402
 from agent.evolution.orchestrator import run_evolution_pass  # noqa: E402
+from agent.lib.health_gate import preflight_probe  # noqa: E402
 
 SKILL_ID = "curator"
 CURATOR_ENABLED_VAR = "ENVISION_CURATOR_ENABLED"
@@ -61,20 +64,40 @@ def is_curator_enabled() -> bool:
 
 
 def run(now: datetime, db: Connection) -> dict:
-    if not is_curator_enabled():
+    if not preflight_probe(db):
+        return {
+            "health_gate": "preflight_failed",
+            "enabled": is_curator_enabled(),
+            "targeted": [],
+            "mutated": 0,
+            "accepted": 0,
+        }
+
+    curator_on = is_curator_enabled()
+    generator_on = is_generator_seeded()
+
+    if not curator_on and not generator_on:
         print(
             f"[{SKILL_ID}] disabled by kill switch "
-            f"({CURATOR_ENABLED_VAR}={os.environ.get(CURATOR_ENABLED_VAR)}); exiting."
+            f"({CURATOR_ENABLED_VAR}={os.environ.get(CURATOR_ENABLED_VAR)}) "
+            "and generator not seeded; exiting."
         )
         return {"enabled": False, "targeted": [], "mutated": 0, "accepted": 0}
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if (curator_on or generator_on) and not os.environ.get("ANTHROPIC_API_KEY"):
         print(f"[{SKILL_ID}] ANTHROPIC_API_KEY not set", file=sys.stderr)
         return {"error": "ANTHROPIC_API_KEY not set"}
 
-    summary = run_evolution_pass(db, now, budget=BudgetTracker())
+    summary = run_evolution_pass(
+        db,
+        now,
+        budget=BudgetTracker(),
+        curator_enabled=curator_on,
+    )
     out = summary.as_dict()
-    out["enabled"] = True
+    out["enabled"] = curator_on
+    out["generator_seeded"] = generator_on
+    out["health_gate"] = "ok"
     return out
 
 

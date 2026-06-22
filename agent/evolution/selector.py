@@ -21,8 +21,13 @@ for p in (str(REPO_ROOT), str(AGENT_LIB)):
 from agent.evolution.backtest_harness import SKILL_CADENCE, backtest_skill  # noqa: E402
 from agent.evolution.constants import BACKTEST_EPOCH  # noqa: E402
 from agent.evolution.skill_loader import (  # noqa: E402
+    SKILL_FOLDERS,
     load_run_from_source,
     load_skill_run,
+)
+from agent.evolution.skill_metadata import (  # noqa: E402
+    cadence_timedelta,
+    parse_disaster_class,
 )
 from agent.evolution.skill_surface import normalize_mutation_surface  # noqa: E402
 from agent.lib.repo_env import load_repo_env  # noqa: E402
@@ -52,6 +57,7 @@ class CandidateRow:
     skill_id: str
     source_code: str
     current_version: int
+    generation_method: str = "mutated"
 
 
 @dataclass
@@ -61,15 +67,20 @@ class SelectionResult:
     windows: list[tuple[datetime, datetime]] = field(default_factory=list)
 
 
-def _disaster_class(skill_id: str) -> str:
+def _disaster_class(skill_id: str, source_code: str | None = None) -> str:
+    if source_code:
+        try:
+            return parse_disaster_class(source_code, skill_id)
+        except KeyError:
+            pass
     d = SKILL_DISASTER_CLASS.get(skill_id)
     if not d:
         raise KeyError(f"no disaster class mapping for {skill_id!r}")
     return d
 
 
-def _count_gt_post_epoch(db: Connection, skill_id: str) -> int:
-    dclass = _disaster_class(skill_id)
+def _count_gt_post_epoch(db: Connection, skill_id: str, source_code: str | None = None) -> int:
+    dclass = _disaster_class(skill_id, source_code)
     aliases = list(class_aliases(dclass))
     with db.cursor() as cur:
         cur.execute(
@@ -110,9 +121,10 @@ def _count_gt_in_window(
 def build_disjoint_windows(
     db: Connection,
     skill_id: str,
+    source_code: str | None = None,
 ) -> list[tuple[datetime, datetime]]:
     """Build MIN_WINDOWS non-overlapping windows with enough ground truth each."""
-    dclass = _disaster_class(skill_id)
+    dclass = _disaster_class(skill_id, source_code)
     aliases = list(class_aliases(dclass))
     with db.cursor() as cur:
         cur.execute(
@@ -178,19 +190,26 @@ def build_viability_window(
     skill_id: str,
     *,
     now: datetime | None = None,
+    source_code: str | None = None,
 ) -> tuple[datetime, datetime] | None:
     """One cadence tick at the latest signal time — fast emit check vs parent."""
     from agent.evolution.skill_validator import _pick_smoke_time
 
     now = now or datetime.now(timezone.utc)
-    if skill_id not in SKILL_CADENCE:
+    if skill_id in SKILL_CADENCE:
+        step = SKILL_CADENCE[skill_id]
+    elif source_code:
+        try:
+            step = cadence_timedelta(source_code, skill_id)
+        except KeyError:
+            return None
+    else:
         return None
     t = _pick_smoke_time(db, now)
     if t.tzinfo is None:
         t = t.replace(tzinfo=timezone.utc)
     if t < BACKTEST_EPOCH:
         t = BACKTEST_EPOCH
-    step = SKILL_CADENCE[skill_id]
     t_end = t + step
     if t_end <= t:
         return None
@@ -201,7 +220,8 @@ def load_pending_candidates(db: Connection) -> list[CandidateRow]:
     with db.cursor() as cur:
         cur.execute(
             """
-            SELECT p.id, l.id, l.skill_id, l.source_code, p.current_version
+            SELECT p.id, l.id, l.skill_id, l.source_code, p.current_version,
+                   l.generation_method
             FROM skill_edit_proposals p
             JOIN skill_lineage l ON l.proposal_id = p.id
             WHERE p.status = 'pending'
@@ -216,6 +236,7 @@ def load_pending_candidates(db: Connection) -> list[CandidateRow]:
                 skill_id=r[2],
                 source_code=r[3],
                 current_version=int(r[4]),
+                generation_method=r[5] or "mutated",
             )
             for r in cur.fetchall()
         ]
@@ -258,7 +279,6 @@ def _viability_gate(
     parent_lineage_id: str | None,
 ) -> tuple[bool, list[str]]:
     """Light gate: emit >0 and within 3x parent volume on one cadence tick."""
-    del parent_lineage_id
     from unittest.mock import patch
 
     from agent.evolution.backtest_connection import BacktestConnection
@@ -267,16 +287,19 @@ def _viability_gate(
     t = window[0]
     surface = normalize_mutation_surface(cand.source_code)
     candidate_run = load_run_from_source(surface, cand.skill_id)
-    parent_run = load_skill_run(cand.skill_id)
 
     try:
         with _backtest_llm_guard(), patch.object(
             psycopg.Cursor, "execute", _blocked_execute
         ):
-            db_parent = BacktestConnection(db, cand.skill_id, t)
             db_cand = BacktestConnection(db, cand.skill_id, t)
-            parent_out = parent_run(t, db_parent)
             cand_out = candidate_run(t, db_cand)
+            parent_n = 0
+            if cand.generation_method != "generated" and cand.skill_id in SKILL_FOLDERS:
+                parent_run = load_skill_run(cand.skill_id)
+                db_parent = BacktestConnection(db, cand.skill_id, t)
+                parent_out = parent_run(t, db_parent)
+                parent_n = len(parent_out) if isinstance(parent_out, list) else 0
     except Exception as exc:
         return False, [f"viability run failed: {type(exc).__name__}: {exc}"]
     finally:
@@ -284,7 +307,10 @@ def _viability_gate(
 
     if not isinstance(cand_out, list):
         return False, ["run() must return a list"]
-    parent_n = len(parent_out) if isinstance(parent_out, list) else 0
+    if cand.generation_method == "generated":
+        if len(cand_out) < MIN_FORECASTS_EMITTED:
+            return False, ["candidate emitted 0 forecasts on window"]
+        return True, []
     reasons = _compare_emissions(parent_n, len(cand_out))
     return len(reasons) == 0, reasons
 
@@ -298,42 +324,63 @@ def _pathology_filter(
     """Reject zero-emit or spammy candidates across cross-windows (no Brier ranking)."""
     surface = normalize_mutation_surface(cand.source_code)
     candidate_run = load_run_from_source(surface, cand.skill_id)
-    parent_run = load_skill_run(cand.skill_id)
+    parent_run = None
+    if cand.generation_method != "generated" and cand.skill_id in SKILL_FOLDERS:
+        parent_run = load_skill_run(cand.skill_id)
 
     total_emitted = 0
     reasons: list[str] = []
 
     for ws, we in windows:
-        parent_rows = backtest_skill(
-            cand.skill_id,
-            [(ws, we)],
-            db,
-            version=cand.current_version,
-            run_fn=parent_run,
-            lineage_id=parent_lineage_id,
-        )
-        cand_rows = backtest_skill(
-            cand.skill_id,
-            [(ws, we)],
-            db,
-            version=None,
-            run_fn=candidate_run,
-            lineage_id=cand.lineage_id,
-        )
-        if not parent_rows or not cand_rows:
-            reasons.append(f"backtest failed for window {ws.isoformat()}")
-            return False, reasons
-
-        window_reasons = _compare_emissions(
-            parent_rows[0].forecasts_emitted,
-            cand_rows[0].forecasts_emitted,
-        )
-        if window_reasons:
-            reasons.extend(
-                [f"window {ws.date()}–{we.date()}: {r}" for r in window_reasons]
+        if parent_run is not None:
+            parent_rows = backtest_skill(
+                cand.skill_id,
+                [(ws, we)],
+                db,
+                version=cand.current_version,
+                run_fn=parent_run,
+                lineage_id=parent_lineage_id,
             )
-            return False, reasons
-        total_emitted += cand_rows[0].forecasts_emitted
+            cand_rows = backtest_skill(
+                cand.skill_id,
+                [(ws, we)],
+                db,
+                version=None,
+                run_fn=candidate_run,
+                lineage_id=cand.lineage_id,
+            )
+            if not parent_rows or not cand_rows:
+                reasons.append(f"backtest failed for window {ws.isoformat()}")
+                return False, reasons
+
+            window_reasons = _compare_emissions(
+                parent_rows[0].forecasts_emitted,
+                cand_rows[0].forecasts_emitted,
+            )
+            if window_reasons:
+                reasons.extend(
+                    [f"window {ws.date()}–{we.date()}: {r}" for r in window_reasons]
+                )
+                return False, reasons
+            total_emitted += cand_rows[0].forecasts_emitted
+        else:
+            cand_rows = backtest_skill(
+                cand.skill_id,
+                [(ws, we)],
+                db,
+                version=None,
+                run_fn=candidate_run,
+                lineage_id=cand.lineage_id,
+            )
+            if not cand_rows:
+                reasons.append(f"backtest failed for window {ws.isoformat()}")
+                return False, reasons
+            if cand_rows[0].forecasts_emitted < MIN_FORECASTS_EMITTED:
+                reasons.append(
+                    f"window {ws.date()}–{we.date()}: candidate emitted 0 forecasts"
+                )
+                return False, reasons
+            total_emitted += cand_rows[0].forecasts_emitted
 
     if total_emitted < MIN_FORECASTS_EMITTED:
         reasons.append("candidate emitted 0 forecasts across all windows")
@@ -362,7 +409,10 @@ def select_candidates(
     selected: list[str] = []
 
     for skill_id, skill_cands in by_skill.items():
-        viability_window = build_viability_window(db, skill_id)
+        first_source = skill_cands[0].source_code if skill_cands else None
+        viability_window = build_viability_window(
+            db, skill_id, source_code=first_source
+        )
         if viability_window is None:
             for c in skill_cands:
                 result.rejections[c.lineage_id] = ["invalid viability window span"]
@@ -371,10 +421,12 @@ def select_candidates(
         parent = load_parent_lineage(db, skill_id)
         parent_lineage_id = parent[0] if parent else None
 
-        gt_total = _count_gt_post_epoch(db, skill_id)
+        gt_total = _count_gt_post_epoch(db, skill_id, first_source)
         pathology_windows: list[tuple[datetime, datetime]] = []
         if gt_total >= MIN_GT_FOR_PATHOLOGY:
-            pathology_windows = build_disjoint_windows(db, skill_id)
+            pathology_windows = build_disjoint_windows(
+                db, skill_id, first_source
+            )
             if len(pathology_windows) >= MIN_WINDOWS and not result.windows:
                 result.windows = pathology_windows
         else:
