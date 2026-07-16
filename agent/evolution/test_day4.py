@@ -139,20 +139,24 @@ class CuratorSubsumesV2Tests(unittest.TestCase):
 
 class OrchestrationTests(unittest.TestCase):
     @patch("agent.evolution.orchestrator.select_candidates")
-    @patch("agent.evolution.orchestrator.mutate_skill")
-    @patch("agent.evolution.orchestrator.pick_worst_k_skills")
-    def test_orchestration_order(self, mock_pick, mock_mutate, mock_select):
-        from agent.evolution.mutator import MutationResult
+    @patch("agent.evolution.orchestrator.run_critic_loop")
+    def test_orchestration_order(self, mock_critic, mock_select):
+        from agents.critic.loop import CriticResult
         from agent.evolution.selector import SelectionResult
         from agent.evolution.orchestrator import run_evolution_pass
 
-        mock_pick.return_value = ["wildfire_risk_elevated"]
-        mock_mutate.return_value = MutationResult(accepted=True, proposal_id="p", lineage_id="l")
+        mock_critic.return_value = CriticResult(
+            agent_run_id=__import__("uuid").uuid4(),
+            status="completed",
+            step_count=3,
+            proposal_ids=["p"],
+        )
         mock_select.return_value = SelectionResult(selected_lineage_ids=["l"])
 
         db = MagicMock()
         summary = run_evolution_pass(db, datetime.now(timezone.utc), budget=BudgetTracker())
-        mock_mutate.assert_called_once()
+        mock_critic.assert_called_once()
+        self.assertEqual(mock_critic.call_args.kwargs.get("trigger"), "scheduled")
         mock_select.assert_called_once()
         self.assertEqual(summary.accepted, 1)
         self.assertEqual(summary.selected_to_shadow, ["l"])

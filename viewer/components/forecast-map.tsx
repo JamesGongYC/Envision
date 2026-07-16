@@ -17,13 +17,15 @@ const ForecastMapImpl = dynamic(() => import('./forecast-map-impl'), {
 export default function ForecastMap({
   forecasts,
   height,
+  geoFocus = null,
 }: {
   forecasts: Forecast[];
   height: string;
+  geoFocus?: GeoJSON.Geometry | null;
 }) {
   return (
     <div className="h-full w-full" style={{ height, minHeight: 192 }}>
-      <ForecastMapImpl forecasts={forecasts} />
+      <ForecastMapImpl forecasts={forecasts} geoFocus={geoFocus} />
     </div>
   );
 }

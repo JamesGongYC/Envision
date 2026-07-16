@@ -3,6 +3,7 @@
 import { forwardRef } from 'react';
 import Link from 'next/link';
 import { TypingText } from '@/components/typing-text';
+import { ProducerBadge } from '@/components/producer-badge';
 import type { Forecast } from '@/lib/types';
 import { SKILL_METADATA } from '@/lib/skill-metadata';
 
@@ -38,8 +39,11 @@ export const ForecastDropdown = forwardRef<HTMLDivElement, ForecastDropdownProps
       >
         <div className="flex justify-between items-baseline gap-2 mb-2">
           <h3 className="font-medium text-[var(--foreground)]">{displayName}</h3>
-          <span className="text-xs text-[var(--muted)] shrink-0">
-            v{forecast.skill_version}
+          <span className="flex items-center gap-2 shrink-0">
+            <ProducerBadge producer={forecast.producer} />
+            <span className="text-xs text-[var(--muted)]">
+              v{forecast.skill_version}
+            </span>
           </span>
         </div>
         <div className="text-xs text-[var(--muted)] mb-2">

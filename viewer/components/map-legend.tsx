@@ -101,6 +101,17 @@ export function MapLegend({
         <span className="inline-block h-3 w-3 rounded-sm border-2 border-blue-600 bg-blue-300/70" />
         Typhoon
       </span>
+      <span className="flex items-center gap-1.5 whitespace-nowrap">
+        <span
+          className="inline-block h-3 w-3 rounded-sm border-2 border-[var(--foreground)]"
+          style={{ borderStyle: 'dashed' }}
+        />
+        Agent
+      </span>
+      <span className="flex items-center gap-1.5 whitespace-nowrap">
+        <span className="inline-block h-3 w-3 rounded-sm border border-[var(--border)] bg-[var(--muted)]/30" />
+        Rule
+      </span>
 
       {uiVisibility.signals &&
         SIGNAL_LEGEND.map(({ key, label }) => (

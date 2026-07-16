@@ -14,17 +14,24 @@ except ImportError:
 _ALLOWED_TABLES = frozenset({"forecasts", "forecasts_shadow"})
 
 
+_ALLOWED_PRODUCERS = frozenset({"rule", "agent"})
+
+
 def emit_forecasts(
     forecasts: list[Forecast],
     db: Connection,
     *,
     table: str = "forecasts",
     lineage_id: str | None = None,
+    producer: str = "rule",
+    agent_run_id: str | None = None,
 ) -> int:
     if table not in _ALLOWED_TABLES:
         raise ValueError(f"table must be one of {_ALLOWED_TABLES}, got {table!r}")
     if table == "forecasts_shadow" and not lineage_id:
         raise ValueError("lineage_id required when table='forecasts_shadow'")
+    if producer not in _ALLOWED_PRODUCERS:
+        raise ValueError(f"producer must be one of {_ALLOWED_PRODUCERS}, got {producer!r}")
     if not forecasts:
         return 0
 
@@ -53,7 +60,8 @@ def emit_forecasts(
               id, issued_at, valid_from, valid_until,
               disaster_class, geometry, probability,
               skill_id, skill_version, contributing_signal_ids,
-              reasoning, is_baseline, trace
+              reasoning, is_baseline, trace,
+              producer, agent_run_id
             ) VALUES (
               %(id)s, %(issued_at)s, %(valid_from)s, %(valid_until)s,
               %(disaster_class)s,
@@ -62,7 +70,8 @@ def emit_forecasts(
               %(skill_id)s, %(skill_version)s,
               %(contributing_signal_ids)s::uuid[],
               %(reasoning)s, %(is_baseline)s,
-              %(trace)s::jsonb
+              %(trace)s::jsonb,
+              %(producer)s, %(agent_run_id)s
             )
         """
 
@@ -88,6 +97,9 @@ def emit_forecasts(
         }
         if table == "forecasts_shadow":
             row["lineage_id"] = lineage_id
+        else:
+            row["producer"] = producer
+            row["agent_run_id"] = agent_run_id
         rows.append(row)
 
     with db.cursor() as cur:

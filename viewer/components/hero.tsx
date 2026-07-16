@@ -36,7 +36,7 @@ export function Hero() {
             WILDFIRE · CYCLONE
           </p>
           <p className="mt-1 font-[family-name:var(--font-mono)] text-sm sm:text-base text-[var(--muted)] tracking-widest uppercase">
-            GLOBAL · SELF-EVOLVING
+            GLOBAL · 24/7
           </p>
         </div>
 
@@ -49,7 +49,7 @@ export function Hero() {
             className="font-[family-name:var(--font-mono)] text-[clamp(3rem,10vw,6rem)] font-medium leading-none text-[var(--foreground)] sm:text-right"
             aria-hidden
           >
-            GLOBAL
+            SELF-EVOLUTION
           </p>
         </div>
       </div>

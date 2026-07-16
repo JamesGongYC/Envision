@@ -39,6 +39,7 @@ _BANNED_IMPORT_ROOTS = frozenset({
     "urllib",
     "ftplib",
     "telnetlib",
+    "pipeline",  # aggregator / priced_emit — outside mutation surface
 })
 
 _BANNED_CALLS = frozenset({
@@ -230,10 +231,18 @@ def check_no_persistence(source: str) -> tuple[bool, str]:
 
     if re.search(r"\bemit_forecasts\s*\(", source):
         return False, "emit_forecasts() not allowed in skill"
+    if re.search(r"\bemit_priced\s*\(", source):
+        return False, "emit_priced() not allowed in skill"
+    if re.search(r"\baggregate\s*\(", source) and re.search(
+        r"\b(from\s+pipeline|import\s+pipeline|from\s+aggregator)\b", source
+    ):
+        return False, "aggregator not allowed in skill"
     if re.search(r"\bforecast_writer\b", source) and "import" in source:
         if "from forecast_writer" in source or "import forecast_writer" in source:
             if "emit_forecasts" in source:
                 return False, "forecast_writer persistence not allowed"
+    if re.search(r"\b(priced_emit|aggregator_interface)\b", source) and "import" in source:
+        return False, "aggregator path not allowed in skill"
 
     return True, ""
 

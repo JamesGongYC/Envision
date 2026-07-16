@@ -19,9 +19,14 @@ python -m modal secret create envision-neon \
   DATABASE_URL='<neon-url>' \
   ANTHROPIC_API_KEY='<key>' \
   ENVISION_CURATOR_ENABLED=true \
+  ENVISION_OPERATOR_TOKEN='<long-random-token>' \
   NWS_USER_AGENT='envision-monitor (you@example.com)' \
   FIRMS_MAP_KEY='<firms-map-key>'
 ```
+
+`ENVISION_OPERATOR_TOKEN` gates write-capable agent fire routes on the ASGI app
+([`agents/api/`](../../agents/api/README.md)). Recreate replaces the whole secret —
+include every field above (and any optional generator / LLM-gate vars you use).
 
 Optional generator (v3.2, operator-seeded — not on daily mutation tick):
 
@@ -58,6 +63,7 @@ Optional: `JTWC_USER_AGENT` (browser-like string) if JTWC returns 403 from Modal
 | `wildfire-risk-elevated` | every 30m | DBSCAN + NWS/ECMWF/AIFS polygons → `forecasts` |
 | `typhoon-intensifying` | every 3h | NHC pressure trend → `forecasts` |
 | `typhoon-landfall-imminent` | every 3h | Cone vs populated places → `forecasts` |
+| `envision-agent-api` | ASGI (no cron) | Operator-gated forecaster fire + public replay SSE ([`agents/api/`](../../agents/api/)) |
 
 Detection Modal entrypoints: `emit_forecasts(run(now, db), db)` from [`agent/lib/forecast_writer.py`](../lib/forecast_writer.py). v3 backtest calls `run()` only (no writes).
 

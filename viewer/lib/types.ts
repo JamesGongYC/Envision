@@ -17,6 +17,28 @@ export interface Forecast {
   contributing_signal_ids: string[]; // UUIDs
   reasoning: string;
   is_baseline: boolean;
+  producer: 'rule' | 'agent';
+  agent_run_id: string | null;
+}
+
+/** T4 / v4 §5 SSE step payload */
+export interface AgentStepEvent {
+  run_id: string | null;
+  seq: number;
+  step_type: 'thought' | 'action' | 'observation' | 'gated' | 'terminal';
+  tool: string | null;
+  input: unknown;
+  output: unknown;
+  geo_focus: GeoJSON.Geometry | null;
+  ts: string;
+}
+
+export interface AgentRunSummary {
+  id: string;
+  agent_type: string;
+  status: string;
+  finished_at: string | null;
+  step_count: number;
 }
 
 export interface Signal {

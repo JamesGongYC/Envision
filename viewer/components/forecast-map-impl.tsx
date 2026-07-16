@@ -14,6 +14,7 @@ import { MapPanes } from '@/components/map-panes';
 import { SignalLayer } from '@/components/signal-layer';
 import { PolygonSignalLayer } from '@/components/polygon-signal-layer';
 import { WindLayer } from '@/components/wind-layer';
+import { MapSpotlight } from '@/components/agent/MapSpotlight';
 
 const SIGNAL_LAYER_IDS: LayerId[] = [
   'firms_hotspots',
@@ -135,8 +136,10 @@ function ForecastMapOverlays({ forecasts }: { forecasts: Forecast[] }) {
 
 export default function ForecastMapImpl({
   forecasts,
+  geoFocus = null,
 }: {
   forecasts: Forecast[];
+  geoFocus?: GeoJSON.Geometry | null;
 }) {
   const { visibility } = useLayerVisibility();
 
@@ -158,6 +161,7 @@ export default function ForecastMapImpl({
       />
 
       <MapPanes />
+      <MapSpotlight geoFocus={geoFocus} />
       {visibility.aifs_wind_field && <WindLayer />}
       <ActiveSignalLayers />
       <ActivePolygonLayers />

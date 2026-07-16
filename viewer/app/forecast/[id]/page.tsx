@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ContributingSignalsList } from '@/components/contributing-signals-list';
 import ForecastDetailMap from '@/components/forecast-detail-map';
+import { ProducerBadge } from '@/components/producer-badge';
 import { groupContributingSignals } from '@/lib/group-contributing-signals';
 import {
   getContributingSignals,
@@ -67,6 +68,7 @@ export default async function ForecastPage({
             >
               {forecast.disaster_class}
             </span>
+            <ProducerBadge producer={forecast.producer} />
             <code className="text-xs text-[var(--muted)]">
               {forecast.skill_id} v{forecast.skill_version}
             </code>

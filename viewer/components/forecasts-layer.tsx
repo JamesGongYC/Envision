@@ -55,6 +55,7 @@ export function ForecastsLayer({
           0.2,
           Math.min(0.65, f.probability * 0.75)
         );
+        const isAgent = f.producer === 'agent';
         return (
           <GeoJSON
             key={`${f.id}-poly`}
@@ -63,9 +64,10 @@ export function ForecastsLayer({
             style={() => ({
               color: style.stroke,
               fillColor: style.fill,
-              fillOpacity,
-              weight: 1.5,
+              fillOpacity: isAgent ? Math.min(0.75, fillOpacity + 0.1) : fillOpacity,
+              weight: isAgent ? 2.5 : 1.5,
               opacity: 0.85,
+              dashArray: isAgent ? '4 3' : undefined,
             })}
           />
         );
@@ -76,18 +78,20 @@ export function ForecastsLayer({
         if (!center) return null;
         const style = CLASS_STYLES[f.disaster_class];
         const latLng = L.latLng(center[0], center[1]);
+        const isAgent = f.producer === 'agent';
         return (
           <CircleMarker
             key={`${f.id}-marker`}
             center={center}
-            radius={7}
+            radius={isAgent ? 8 : 7}
             pane={FORECASTS_PANE}
             pathOptions={{
               color: style.stroke,
-              fillColor: style.fill,
+              fillColor: isAgent ? style.stroke : style.fill,
               fillOpacity: 0.9,
-              weight: 2.5,
+              weight: isAgent ? 3 : 2.5,
               opacity: 1,
+              dashArray: isAgent ? '2 2' : undefined,
             }}
             eventHandlers={{
               click: (e) => {

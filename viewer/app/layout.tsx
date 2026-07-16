@@ -60,6 +60,9 @@ export default function RootLayout({
             <Link href="/how-it-works" className={navLink}>
               How it works
             </Link>
+            <Link href="/agent" className={navLink}>
+              Agent
+            </Link>
             <Link href="/evolution" className={navLink}>
               Evolution
             </Link>

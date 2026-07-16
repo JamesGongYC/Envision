@@ -48,6 +48,7 @@ def curator_cycle() -> dict:
     sys.path.insert(0, "/root")
     sys.path.insert(0, "/root/skill")
     sys.path.insert(0, "/root/agent_lib")
+    sys.path.insert(0, "/root/agent")
     import psycopg
 
     import run as pipeline

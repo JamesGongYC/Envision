@@ -10,7 +10,15 @@ from typing import Any, Literal
 
 from psycopg import Connection
 
-CallSite = Literal["mutator", "curator", "generator", "narrator", "probe"]
+CallSite = Literal[
+    "mutator",
+    "curator",
+    "generator",
+    "narrator",
+    "probe",
+    "forecaster",
+    "critic",
+]
 
 MAX_RETRIES_PER_MODEL = 3
 BACKOFF_BASE_S = 1.0

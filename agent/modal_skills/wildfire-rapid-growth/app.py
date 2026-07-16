@@ -40,16 +40,17 @@ secret = modal.Secret.from_name("envision-neon")
 def detect_cycle() -> int:
     import sys
 
+    sys.path.insert(0, "/root")
     sys.path.insert(0, "/root/skill")
     sys.path.insert(0, "/root/agent_lib")
     import psycopg
 
-    from forecast_writer import emit_forecasts
+    from pipeline.priced_emit import emit_priced
     from run import run
 
     now = datetime.now(timezone.utc)
     with psycopg.connect(os.environ["DATABASE_URL"], autocommit=False) as conn:
-        n = emit_forecasts(run(now, conn), conn)
+        n = emit_priced(run(now, conn), conn, producer="rule")
         conn.commit()
         return n
 

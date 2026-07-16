@@ -22,7 +22,9 @@ export async function getActiveForecasts(): Promise<Forecast[]> {
       skill_version,
       contributing_signal_ids,
       reasoning,
-      is_baseline
+      is_baseline,
+      COALESCE(producer, 'rule') AS producer,
+      agent_run_id
     FROM forecasts
     WHERE valid_until > now()
       AND is_baseline = false
@@ -46,7 +48,9 @@ export async function getForecast(id: string): Promise<Forecast | null> {
       skill_version,
       contributing_signal_ids,
       reasoning,
-      is_baseline
+      is_baseline,
+      COALESCE(producer, 'rule') AS producer,
+      agent_run_id
     FROM forecasts
     WHERE id = ${id}
     LIMIT 1
