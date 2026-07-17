@@ -25,7 +25,7 @@ export interface Forecast {
 export interface AgentStepEvent {
   run_id: string | null;
   seq: number;
-  step_type: 'thought' | 'action' | 'observation' | 'gated' | 'terminal';
+  step_type: 'thought' | 'action' | 'observation' | 'gated' | 'terminal' | 'failed';
   tool: string | null;
   input: unknown;
   output: unknown;

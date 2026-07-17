@@ -2,9 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import ForecastMap from '@/components/forecast-map';
+import { AgentTranscript } from '@/components/agent/AgentTranscript';
 import { FireControl } from '@/components/agent/FireControl';
-import { TracePanel } from '@/components/agent/TracePanel';
-import { ToolUseCards } from '@/components/agent/ToolUseCards';
 import { streamAgentSse } from '@/lib/sse';
 import type { AgentStepEvent, Forecast } from '@/lib/types';
 
@@ -85,8 +84,8 @@ export function ForecasterDemo({
             Forecaster
           </h2>
           <p className="mt-1 text-sm font-[family-name:var(--font-mono)] text-[var(--muted)] max-w-xl">
-            Live ReAct trace with map spotlight. Public surface replays the last
-            real run; operators can fire a new production cycle.
+            Live ReAct transcript with map spotlight. Public surface replays the
+            last real run; operators can fire a new production cycle.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -130,6 +129,11 @@ export function ForecasterDemo({
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <AgentTranscript
+          steps={steps}
+          streaming={busy}
+          variant="forecaster"
+        />
         <div className="border border-[var(--border)] overflow-hidden min-h-[20rem]">
           <ForecastMap
             forecasts={
@@ -138,10 +142,6 @@ export function ForecasterDemo({
             height="20rem"
             geoFocus={geoFocus}
           />
-        </div>
-        <div className="space-y-3">
-          <TracePanel steps={steps} streaming={busy} />
-          <ToolUseCards steps={steps} />
         </div>
       </div>
     </section>

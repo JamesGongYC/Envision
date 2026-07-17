@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,22 +9,35 @@ import modal
 
 APP_NAME = "critic-agent"
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-AGENT_DIR = REPO_ROOT / "agent"
-AGENTS_DIR = REPO_ROOT / "agents"
-PIPELINE_DIR = REPO_ROOT / "pipeline"
-SHARED = AGENT_DIR / "modal_skills" / "_shared"
+# Inline deps — avoid Path(__file__) parent walks (Modal flattens entrypoint to /root/app.py).
+_PIP = (
+    "psycopg[binary]",
+    "shapely",
+    "scikit-learn",
+    "numpy",
+    "httpx",
+    "anthropic",
+)
 
-if str(SHARED) not in sys.path:
-    sys.path.insert(0, str(SHARED))
-from skill_exec_image import SKILL_EXEC_PIP_PACKAGES  # noqa: E402
+
+def _ignore_junk(p: Path) -> bool:
+    """Exclude caches/dotfiles; keep SKILL.md and other non-.py assets."""
+    return (
+        p.name.startswith(".")
+        or p.name == "__pycache__"
+        or p.suffix in {".pyc", ".pyo"}
+    )
+
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install(*SKILL_EXEC_PIP_PACKAGES)
-    .add_local_dir(str(AGENT_DIR), remote_path="/root/agent")
-    .add_local_dir(str(AGENTS_DIR), remote_path="/root/agents")
-    .add_local_dir(str(PIPELINE_DIR), remote_path="/root/pipeline")
+    .pip_install(*_PIP)
+    .add_local_python_source(
+        "agent",
+        "agents",
+        "pipeline",
+        ignore=_ignore_junk,
+    )
 )
 
 app = modal.App(APP_NAME)
@@ -39,13 +51,6 @@ secret = modal.Secret.from_name("envision-neon")
 )
 def critic_agent(trigger: str = "operator") -> dict:
     """Run one critic ReAct cycle. Manual invoke; curator cron uses loop directly."""
-    import sys
-
-    sys.path.insert(0, "/root")
-    sys.path.insert(0, "/root/agents")
-    sys.path.insert(0, "/root/agent/lib")
-    sys.path.insert(0, "/root/agent")
-
     import psycopg
 
     from agents.critic.loop import run_critic_loop
