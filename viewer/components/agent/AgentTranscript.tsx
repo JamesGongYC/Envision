@@ -249,7 +249,7 @@ export function AgentTranscript({
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="max-h-[32rem] overflow-y-auto px-3 py-3 space-y-4"
+        className="max-h-[32rem] overflow-y-auto px-3 py-4 space-y-5"
       >
         {items.length === 0 && (
           <p className="text-sm text-[var(--muted)] font-[family-name:var(--font-mono)]">
@@ -260,10 +260,7 @@ export function AgentTranscript({
         {items.map((item) => {
           if (item.kind === 'thought') {
             return (
-              <div key={item.key} className="space-y-1">
-                <div className="text-[10px] uppercase tracking-wider font-[family-name:var(--font-mono)] text-[var(--muted)]">
-                  Reasoning
-                </div>
+              <div key={item.key} className="space-y-1.5">
                 <p className="text-base md:text-lg leading-relaxed text-[var(--foreground)] font-[family-name:var(--font-display)]">
                   <TypingText
                     key={`thought-${item.seq}`}
@@ -277,14 +274,14 @@ export function AgentTranscript({
 
           if (item.kind === 'tool') {
             return (
-              <div key={item.key} className="opacity-90">
+              <div key={item.key} className="py-0.5">
                 <ToolCallRow
                   tool={item.tool}
                   input={item.input}
                   output={item.output}
                 />
                 {item.waiting && streaming && (
-                  <p className="pl-4 text-[10px] font-[family-name:var(--font-mono)] text-[var(--muted)] animate-pulse">
+                  <p className="pl-2 text-[10px] font-[family-name:var(--font-mono)] text-[var(--muted)] animate-pulse">
                     waiting for result…
                   </p>
                 )}

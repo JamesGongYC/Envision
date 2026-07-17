@@ -16,32 +16,38 @@ function safeJson(value: unknown): string {
   }
 }
 
+/** Single-line collapsed chip; expand for full raw input/output. */
 export function ToolCallRow({ tool, input, output }: ToolCallRowProps) {
   const summary = summarizeTool(tool, input, output);
 
   return (
-    <details className="group border-t border-[var(--border)] first:border-t-0">
-      <summary className="cursor-pointer list-none flex items-baseline gap-2 py-1.5 px-0.5 text-xs font-[family-name:var(--font-mono)] text-[var(--muted)] hover:text-[var(--foreground)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--foreground)] focus-visible:outline-offset-2 [&::-webkit-details-marker]:hidden">
-        <span className="shrink-0 text-[var(--muted)] group-open:rotate-90 transition-transform inline-block">
+    <details className="group my-1 max-w-full">
+      <summary className="cursor-pointer list-none inline-flex items-center gap-1.5 max-w-full py-0.5 px-2 rounded-sm border border-[var(--border)] bg-[var(--background)]/60 text-[11px] leading-tight font-[family-name:var(--font-mono)] text-[var(--muted)] hover:text-[var(--foreground)] hover:border-[var(--muted)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--foreground)] focus-visible:outline-offset-2 [&::-webkit-details-marker]:hidden">
+        <span
+          aria-hidden
+          className="shrink-0 text-[9px] opacity-70 group-open:rotate-90 transition-transform"
+        >
           ▸
         </span>
-        <span className="shrink-0 uppercase tracking-wider">{tool}</span>
-        <span className="min-w-0 truncate">{summary}</span>
+        <span className="shrink-0 uppercase tracking-wider opacity-80">
+          {tool}
+        </span>
+        <span className="min-w-0 truncate opacity-90">{summary}</span>
       </summary>
-      <div className="pb-2 pl-4 space-y-2">
+      <div className="mt-1.5 mb-2 ml-1 pl-2 border-l border-[var(--border)] space-y-2">
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-[var(--muted)] mb-1">
+          <div className="text-[10px] uppercase tracking-wider text-[var(--muted)] mb-0.5">
             input
           </div>
-          <pre className="text-[11px] leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-all max-h-48 overflow-y-auto">
+          <pre className="text-[11px] leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
             {safeJson(input)}
           </pre>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-[var(--muted)] mb-1">
+          <div className="text-[10px] uppercase tracking-wider text-[var(--muted)] mb-0.5">
             output
           </div>
-          <pre className="text-[11px] leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-all max-h-56 overflow-y-auto">
+          <pre className="text-[11px] leading-relaxed text-[var(--muted)] whitespace-pre-wrap break-all max-h-48 overflow-y-auto">
             {safeJson(output)}
           </pre>
         </div>

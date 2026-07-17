@@ -30,6 +30,11 @@ from agents.common.agent_telemetry import (
     start_run,
     step_to_sse_payload,
 )
+from agents.common.react_prose import (
+    INTENT_NUDGE,
+    NARRATION_SYSTEM_SUFFIX,
+    narration_user_prompt,
+)
 from agents.forecaster.tools import TOOL_SCHEMAS, dispatch_tool
 
 AGENT_MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "12"))
@@ -45,7 +50,12 @@ Tools:
 - run_skill(skill_id): run a skill; returns candidates (raw output is scored independently)
 - emit(selected): TERMINAL — pass selected forecast objects by id only
 
-Use tools via tool_use. Prefer inspect → list → run one or more skills → emit.
+Reasoning discipline (required every turn):
+- Before EVERY tool call, write 1–2 first-person sentences of intent: why this
+  tool, what you expect, how you will use the result. Name signals/skills.
+- Prefer exactly one tool_use per turn.
+- Never echo raw JSON in your prose.
+- Prefer inspect → list → run relevant skills → emit.
 If nothing is worth emitting, call emit with an empty selected list.
 """
 
@@ -257,10 +267,37 @@ def run_forecaster_loop(
             )
 
             thought = _extract_text(response.content)
+            tool_uses = _extract_tool_uses(response.content)
+
+            # Ordering guard: never stream action without an intent thought.
+            if tool_uses and not thought:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": INTENT_NUDGE,
+                    }
+                )
+                if abort_check(db):
+                    _step(
+                        step_type="gated",
+                        tool_output={"reason": "rolling_529_abort"},
+                    )
+                    _finish(
+                        status="gated",
+                        health_gate_state="rolling_529",
+                        step_count=seq,
+                    )
+                    return ForecasterResult(
+                        agent_run_id=run_id,
+                        status="gated",
+                        step_count=seq,
+                        error="rolling_529_abort",
+                    )
+                continue
+
             if thought:
                 _step(step_type="thought", tool_output={"text": thought})
 
-            tool_uses = _extract_tool_uses(response.content)
             if not tool_uses:
                 messages.append(_assistant_message_payload(response))
                 messages.append(
@@ -355,6 +392,43 @@ def run_forecaster_loop(
                         step_count=seq,
                         emitted_ids=emitted_ids,
                     )
+
+                # Post-observation narration (non-terminal only).
+                if abort_check(db):
+                    _step(
+                        step_type="gated",
+                        tool_output={"reason": "rolling_529_abort"},
+                    )
+                    _finish(
+                        status="gated",
+                        health_gate_state="rolling_529",
+                        step_count=seq,
+                    )
+                    return ForecasterResult(
+                        agent_run_id=run_id,
+                        status="gated",
+                        step_count=seq,
+                        error="rolling_529_abort",
+                    )
+                narr_resp, _ = call_llm(
+                    call_site="forecaster",
+                    db=db,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": narration_user_prompt(name, observation),
+                        }
+                    ],
+                    model=DEFAULT_REASONING_MODEL,
+                    fallback_model=DEFAULT_HAIKU,
+                    max_tokens=300,
+                    system=SYSTEM_PROMPT + NARRATION_SYSTEM_SUFFIX,
+                    tools=None,
+                    tool_choice=None,
+                )
+                narration = _extract_text(narr_resp.content)
+                if narration:
+                    _step(step_type="thought", tool_output={"text": narration})
 
             messages.append({"role": "user", "content": tool_results})
             if terminal:

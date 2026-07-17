@@ -99,6 +99,23 @@ def _tool_response(name: str, tool_input: dict, thought: str = "thinking") -> Fa
     )
 
 
+def _text_response(text: str) -> FakeResponse:
+    return FakeResponse(content=[FakeBlock(type="text", text=text)])
+
+
+def _tool_only_response(name: str, tool_input: dict) -> FakeResponse:
+    return FakeResponse(
+        content=[
+            FakeBlock(
+                type="tool_use",
+                id=f"tu_{name}_{uuid.uuid4().hex[:6]}",
+                name=name,
+                input=tool_input,
+            ),
+        ]
+    )
+
+
 class EmitPStripTests(unittest.TestCase):
     def test_model_supplied_p_ignored(self):
         skill_p = 0.42
@@ -209,9 +226,25 @@ class LoopTests(unittest.TestCase):
         cand = _forecast(fid, p=0.5)
         llm = ScriptedLLM(
             [
-                _tool_response("inspect_signals", {}),
-                _tool_response("run_skill", {"skill_id": "wildfire_risk_elevated"}),
-                _tool_response("emit", {"selected": [{"id": fid, "probability": 0.99}]}),
+                _tool_response(
+                    "inspect_signals",
+                    {},
+                    thought="I'll inspect the signal catalog first.",
+                ),
+                _text_response(
+                    "Catalog is thin on cyclones; I'll run a wildfire skill next."
+                ),
+                _tool_response(
+                    "run_skill",
+                    {"skill_id": "wildfire_risk_elevated"},
+                    thought="Running wildfire_risk_elevated over the western US.",
+                ),
+                _text_response("One solid candidate — enough to emit."),
+                _tool_response(
+                    "emit",
+                    {"selected": [{"id": fid, "probability": 0.99}]},
+                    thought="Emitting the wildfire candidate.",
+                ),
             ]
         )
         deposited: list = []
@@ -223,13 +256,11 @@ class LoopTests(unittest.TestCase):
             if name == "run_skill":
                 cache[fid] = cand
                 deposited.append(cand)
-                # Simulate D2 deposit side-effect marker
                 return {
                     "candidates": [{"id": fid, "probability": 0.5}],
                     "count": 1,
                 }, None, False
             if name == "emit":
-                # emit tool path — call real emit with mocks
                 with patch("agents.forecaster.tools.emit_selected") as mock_es:
                     mock_es.return_value = [uuid.UUID(fid)]
                     from agents.forecaster.tools import emit as real_emit
@@ -240,7 +271,6 @@ class LoopTests(unittest.TestCase):
                         agent_run_id=kwargs["agent_run_id"],
                         candidate_cache=cache,
                     )
-                    # Assert model p ignored
                     written = mock_es.call_args.args[0]
                     self.assertEqual(written[0].probability, 0.5)
                 return {"emitted_ids": ids, "count": len(ids)}, None, True
@@ -260,12 +290,62 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(result.emitted_ids, [fid])
         self.assertEqual(len(deposited), 1)
         types = [s["step_type"] for s in self.tel.steps]
-        # thought/action/observation repeated, then terminal
         self.assertIn("thought", types)
         self.assertIn("action", types)
         self.assertIn("observation", types)
         self.assertIn("terminal", types)
         self.assertEqual(types[-1], "terminal")
+        # intent → action → observation → narration around first tool
+        first = types[:4]
+        self.assertEqual(
+            first, ["thought", "action", "observation", "thought"]
+        )
+        # Narration calls go through the injected call_llm (2 narrations + 3 tool turns)
+        self.assertEqual(llm.calls, 5)
+
+    def test_empty_intent_blocks_action_until_prose(self):
+        llm = ScriptedLLM(
+            [
+                _tool_only_response("list_skills", {}),
+                _tool_response(
+                    "list_skills",
+                    {},
+                    thought="Listing skills to check recent Brier.",
+                ),
+                _text_response("No skills worth running; emitting empty."),
+                _tool_response(
+                    "emit",
+                    {"selected": []},
+                    thought="Nothing to emit this cycle.",
+                ),
+            ]
+        )
+
+        def fake_dispatch(name, tool_input, **kwargs):
+            if name == "list_skills":
+                return [], None, False
+            if name == "emit":
+                return {"emitted_ids": [], "count": 0}, None, True
+            raise AssertionError(name)
+
+        with patch("agents.forecaster.loop.dispatch_tool", fake_dispatch):
+            result = run_forecaster_loop(
+                self.now,
+                self.db,
+                trigger="operator",
+                call_llm=llm,
+                preflight=lambda db: True,
+                abort_check=lambda db: False,
+            )
+
+        self.assertEqual(result.status, "completed")
+        types = [s["step_type"] for s in self.tel.steps]
+        self.assertNotEqual(types[0], "action")
+        # First persisted step after the failed empty-intent turn is a thought
+        self.assertEqual(types[0], "thought")
+        action_idxs = [i for i, t in enumerate(types) if t == "action"]
+        self.assertTrue(action_idxs)
+        self.assertEqual(types[action_idxs[0] - 1], "thought")
 
     def test_run_skill_deposits_even_when_not_selected(self):
         """D2: raw deposit happens inside run_skill regardless of later emit selection."""

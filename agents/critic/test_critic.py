@@ -84,6 +84,23 @@ def _tool_response(name: str, tool_input: dict, thought: str = "thinking") -> Fa
     )
 
 
+def _text_response(text: str) -> FakeResponse:
+    return FakeResponse(content=[FakeBlock(type="text", text=text)])
+
+
+def _tool_only_response(name: str, tool_input: dict) -> FakeResponse:
+    return FakeResponse(
+        content=[
+            FakeBlock(
+                type="tool_use",
+                id=f"tu_{name}_{uuid.uuid4().hex[:6]}",
+                name=name,
+                input=tool_input,
+            ),
+        ]
+    )
+
+
 class InspectForecastsFilterTests(unittest.TestCase):
     def test_producer_filter_is_rule(self):
         self.assertEqual(RAW_PRODUCER_FILTER, "rule")
@@ -220,6 +237,102 @@ class LoopTests(unittest.TestCase):
         types = [s["step_type"] for s in self.tel.steps]
         self.assertIn("terminal", types)
         self.assertEqual(self.tel.trigger, "button")
+        # Terminal mutate skips narration; order is thought → action → observation → terminal
+        self.assertEqual(
+            types[:4], ["thought", "action", "observation", "terminal"]
+        )
+
+    def test_nonterminal_orders_intent_action_obs_narration(self):
+        llm = ScriptedLLM(
+            [
+                _tool_response(
+                    "list_skills",
+                    {},
+                    thought="Listing skills to find a weak Brier target.",
+                ),
+                _text_response(
+                    "wildfire_risk_elevated looks weak; I'll mutate it next."
+                ),
+                _tool_response(
+                    "mutate_skill",
+                    {"skill_id": "wildfire_risk_elevated"},
+                    thought="Mutating the underperformer.",
+                ),
+            ]
+        )
+
+        def fake_dispatch(name, tool_input, **kwargs):
+            if name == "list_skills":
+                return [{"skill_id": "wildfire_risk_elevated"}], False
+            if name == "mutate_skill":
+                return {
+                    "accepted": True,
+                    "proposal_id": "prop-1",
+                    "terminal": True,
+                }, True
+            raise AssertionError(name)
+
+        with patch("agents.critic.loop.dispatch_tool", fake_dispatch):
+            result = run_critic_loop(
+                self.now,
+                self.db,
+                trigger="button",
+                call_llm=llm,
+                preflight=lambda db: True,
+                abort_check=lambda db: False,
+            )
+
+        self.assertEqual(result.status, "completed")
+        types = [s["step_type"] for s in self.tel.steps]
+        self.assertEqual(
+            types[:4], ["thought", "action", "observation", "thought"]
+        )
+        self.assertEqual(types[-1], "terminal")
+        self.assertEqual(llm.calls, 3)
+
+    def test_empty_intent_blocks_action(self):
+        llm = ScriptedLLM(
+            [
+                _tool_only_response("list_skills", {}),
+                _tool_response(
+                    "list_skills",
+                    {},
+                    thought="Listing skills before I pick a mutate target.",
+                ),
+                _text_response("Ready to mutate the worst skill."),
+                _tool_response(
+                    "mutate_skill",
+                    {"skill_id": "wildfire_risk_elevated"},
+                    thought="Mutating now.",
+                ),
+            ]
+        )
+
+        def fake_dispatch(name, tool_input, **kwargs):
+            if name == "list_skills":
+                return [], False
+            if name == "mutate_skill":
+                return {
+                    "accepted": True,
+                    "proposal_id": "p",
+                    "terminal": True,
+                }, True
+            raise AssertionError(name)
+
+        with patch("agents.critic.loop.dispatch_tool", fake_dispatch):
+            result = run_critic_loop(
+                self.now,
+                self.db,
+                trigger="operator",
+                call_llm=llm,
+                preflight=lambda db: True,
+                abort_check=lambda db: False,
+            )
+
+        self.assertEqual(result.status, "completed")
+        types = [s["step_type"] for s in self.tel.steps]
+        self.assertEqual(types[0], "thought")
+        self.assertNotEqual(types[0], "action")
 
 
 class NoAnthropicImportTests(unittest.TestCase):
