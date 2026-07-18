@@ -1,7 +1,8 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import type { Forecast } from '@/lib/types';
+import type { LayerId } from '@/lib/layer-state';
+import type { AgentEmitCandidate, Forecast } from '@/lib/types';
 
 const ForecastMapImpl = dynamic(() => import('./forecast-map-impl'), {
   ssr: false,
@@ -18,14 +19,23 @@ export default function ForecastMap({
   forecasts,
   height,
   geoFocus = null,
+  pulsingLayers = [],
+  candidates = [],
 }: {
   forecasts: Forecast[];
   height: string;
   geoFocus?: GeoJSON.Geometry | null;
+  pulsingLayers?: LayerId[];
+  candidates?: AgentEmitCandidate[];
 }) {
   return (
     <div className="h-full w-full" style={{ height, minHeight: 192 }}>
-      <ForecastMapImpl forecasts={forecasts} geoFocus={geoFocus} />
+      <ForecastMapImpl
+        forecasts={forecasts}
+        geoFocus={geoFocus}
+        pulsingLayers={pulsingLayers}
+        candidates={candidates}
+      />
     </div>
   );
 }

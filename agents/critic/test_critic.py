@@ -84,10 +84,6 @@ def _tool_response(name: str, tool_input: dict, thought: str = "thinking") -> Fa
     )
 
 
-def _text_response(text: str) -> FakeResponse:
-    return FakeResponse(content=[FakeBlock(type="text", text=text)])
-
-
 def _tool_only_response(name: str, tool_input: dict) -> FakeResponse:
     return FakeResponse(
         content=[
@@ -99,6 +95,10 @@ def _tool_only_response(name: str, tool_input: dict) -> FakeResponse:
             ),
         ]
     )
+
+
+def _text_only_response(text: str) -> FakeResponse:
+    return FakeResponse(content=[FakeBlock(type="text", text=text)])
 
 
 class InspectForecastsFilterTests(unittest.TestCase):
@@ -237,42 +237,27 @@ class LoopTests(unittest.TestCase):
         types = [s["step_type"] for s in self.tel.steps]
         self.assertIn("terminal", types)
         self.assertEqual(self.tel.trigger, "button")
-        # Terminal mutate skips narration; order is thought → action → observation → terminal
-        self.assertEqual(
-            types[:4], ["thought", "action", "observation", "terminal"]
-        )
+        self.assertEqual(types[0], "thought")
+        self.assertEqual(types[1], "action")
 
-    def test_nonterminal_orders_intent_action_obs_narration(self):
+    def test_tool_only_response_still_dispatches(self):
         llm = ScriptedLLM(
             [
-                _tool_response(
-                    "list_skills",
-                    {},
-                    thought="Listing skills to find a weak Brier target.",
-                ),
-                _text_response(
-                    "wildfire_risk_elevated looks weak; I'll mutate it next."
-                ),
-                _tool_response(
-                    "mutate_skill",
-                    {"skill_id": "wildfire_risk_elevated"},
-                    thought="Mutating the underperformer.",
-                ),
+                _tool_only_response(
+                    "mutate_skill", {"skill_id": "wildfire_risk_elevated"}
+                )
             ]
         )
+        mut = MagicMock()
+        mut.accepted = True
+        mut.proposal_id = "prop-x"
+        mut.lineage_id = "lin"
+        mut.rejection_reasons = []
+        mut.rationale = "ok"
 
-        def fake_dispatch(name, tool_input, **kwargs):
-            if name == "list_skills":
-                return [{"skill_id": "wildfire_risk_elevated"}], False
-            if name == "mutate_skill":
-                return {
-                    "accepted": True,
-                    "proposal_id": "prop-1",
-                    "terminal": True,
-                }, True
-            raise AssertionError(name)
-
-        with patch("agents.critic.loop.dispatch_tool", fake_dispatch):
+        with patch(
+            "agents.critic.tools.evolution_mutate_skill", return_value=mut
+        ):
             result = run_critic_loop(
                 self.now,
                 self.db,
@@ -284,55 +269,46 @@ class LoopTests(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         types = [s["step_type"] for s in self.tel.steps]
-        self.assertEqual(
-            types[:4], ["thought", "action", "observation", "thought"]
-        )
-        self.assertEqual(types[-1], "terminal")
-        self.assertEqual(llm.calls, 3)
+        self.assertEqual(types[0], "action")
+        self.assertIn("terminal", types)
+        self.assertGreater(result.step_count, 0)
 
-    def test_empty_intent_blocks_action(self):
+    def test_no_tool_turn_reprompts_then_completes(self):
         llm = ScriptedLLM(
             [
-                _tool_only_response("list_skills", {}),
-                _tool_response(
-                    "list_skills",
-                    {},
-                    thought="Listing skills before I pick a mutate target.",
-                ),
-                _text_response("Ready to mutate the worst skill."),
+                _text_only_response("Looking at Brier ranks…"),
                 _tool_response(
                     "mutate_skill",
                     {"skill_id": "wildfire_risk_elevated"},
-                    thought="Mutating now.",
+                    thought="Mutating the weak skill.",
                 ),
             ]
         )
+        mut = MagicMock()
+        mut.accepted = True
+        mut.proposal_id = "prop-y"
+        mut.lineage_id = "lin"
+        mut.rejection_reasons = []
+        mut.rationale = "ok"
 
-        def fake_dispatch(name, tool_input, **kwargs):
-            if name == "list_skills":
-                return [], False
-            if name == "mutate_skill":
-                return {
-                    "accepted": True,
-                    "proposal_id": "p",
-                    "terminal": True,
-                }, True
-            raise AssertionError(name)
-
-        with patch("agents.critic.loop.dispatch_tool", fake_dispatch):
+        with patch(
+            "agents.critic.tools.evolution_mutate_skill", return_value=mut
+        ):
             result = run_critic_loop(
                 self.now,
                 self.db,
-                trigger="operator",
+                trigger="button",
                 call_llm=llm,
                 preflight=lambda db: True,
                 abort_check=lambda db: False,
             )
 
         self.assertEqual(result.status, "completed")
+        self.assertGreaterEqual(llm.calls, 2)
         types = [s["step_type"] for s in self.tel.steps]
         self.assertEqual(types[0], "thought")
-        self.assertNotEqual(types[0], "action")
+        self.assertIn("terminal", types)
+        self.assertGreater(result.step_count, 0)
 
 
 class NoAnthropicImportTests(unittest.TestCase):
@@ -355,6 +331,11 @@ class NoAnthropicImportTests(unittest.TestCase):
                         node.module.split(".")[0],
                         "anthropic",
                         msg=f"{path} imports from anthropic",
+                    )
+                    self.assertNotIn(
+                        "react_prose",
+                        node.module,
+                        msg=f"{path} imports react_prose",
                     )
 
 

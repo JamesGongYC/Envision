@@ -87,8 +87,32 @@ body {
   }
 }
 
+/* T12: pulse existing signal markers / polygons while a skill step is active */
+@keyframes envision-layer-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.envision-layer-pulse {
+  animation: envision-layer-pulse 0.7s ease-in-out infinite;
+}
+
+.envision-signal-icon.envision-layer-pulse {
+  animation: envision-layer-pulse 0.7s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .react-flow__edge path {
+    animation: none !important;
+  }
+
+  .envision-layer-pulse,
+  .envision-signal-icon.envision-layer-pulse {
     animation: none !important;
   }
 }

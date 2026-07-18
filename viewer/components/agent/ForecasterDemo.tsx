@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import ForecastMap from '@/components/forecast-map';
 import { AgentTranscript } from '@/components/agent/AgentTranscript';
 import { FireControl } from '@/components/agent/FireControl';
+import { useRunPlayer } from '@/components/agent/RunPlayer';
 import { streamAgentSse } from '@/lib/sse';
 import type { AgentStepEvent, Forecast } from '@/lib/types';
 
@@ -18,18 +19,17 @@ export function ForecasterDemo({
   lastRunId,
   forecasts,
 }: ForecasterDemoProps) {
-  const [steps, setSteps] = useState<AgentStepEvent[]>([]);
-  const [geoFocus, setGeoFocus] = useState<GeoJSON.Geometry | null>(null);
+  const [buffer, setBuffer] = useState<AgentStepEvent[]>([]);
+  const [sessionId, setSessionId] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<'idle' | 'live' | 'replay'>('idle');
   const abortRef = useRef<AbortController | null>(null);
 
+  const player = useRunPlayer(buffer, { resetKey: sessionId });
+
   const handleStep = useCallback((event: AgentStepEvent) => {
-    setSteps((prev) => [...prev, event]);
-    if (event.geo_focus) {
-      setGeoFocus(event.geo_focus);
-    }
+    setBuffer((prev) => [...prev, event]);
   }, []);
 
   const startStream = useCallback(
@@ -37,8 +37,8 @@ export function ForecasterDemo({
       abortRef.current?.abort();
       const ac = new AbortController();
       abortRef.current = ac;
-      setSteps([]);
-      setGeoFocus(null);
+      setBuffer([]);
+      setSessionId((n) => n + 1);
       setError(null);
       setBusy(true);
       setMode(nextMode);
@@ -75,6 +75,7 @@ export function ForecasterDemo({
   }, [canFire, lastRunId]);
 
   const agentForecasts = forecasts.filter((f) => f.producer === 'agent');
+  const streaming = busy || player.playing;
 
   return (
     <section className="space-y-4">
@@ -92,12 +93,16 @@ export function ForecasterDemo({
           {mode !== 'idle' && (
             <span className="text-[10px] uppercase tracking-wider font-[family-name:var(--font-mono)] text-[var(--muted)]">
               {mode}
-              {busy ? ' · streaming' : ' · done'}
+              {busy
+                ? ' · streaming'
+                : player.playing
+                  ? ' · playing'
+                  : ' · done'}
             </span>
           )}
           {canFire && (
             <FireControl
-              busy={busy}
+              busy={busy || player.playing}
               onFire={() =>
                 void startStream('/api/agent/forecaster/fire', 'POST', 'live')
               }
@@ -106,7 +111,7 @@ export function ForecasterDemo({
           {!canFire && lastRunId && (
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || player.playing}
               onClick={() =>
                 void startStream(
                   `/api/agent/run/${lastRunId}/replay`,
@@ -130,8 +135,8 @@ export function ForecasterDemo({
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <AgentTranscript
-          steps={steps}
-          streaming={busy}
+          steps={player.visibleSteps}
+          streaming={streaming}
           variant="forecaster"
         />
         <div className="border border-[var(--border)] overflow-hidden min-h-[20rem]">
@@ -140,7 +145,9 @@ export function ForecasterDemo({
               agentForecasts.length > 0 ? agentForecasts : forecasts.slice(0, 40)
             }
             height="20rem"
-            geoFocus={geoFocus}
+            geoFocus={player.geoFocus}
+            pulsingLayers={player.pulsingLayers}
+            candidates={player.candidates}
           />
         </div>
       </div>

@@ -245,6 +245,24 @@ def iter_steps(db: Connection, run_id: UUID | str) -> list[dict[str, Any]]:
     return out
 
 
+def _promote_enrichment_fields(
+    payload: dict[str, Any],
+    tool_input: Any,
+    tool_output: Any,
+) -> dict[str, Any]:
+    """Lift known T11 fields from input/output onto the SSE top level."""
+    for bag in (tool_input, tool_output):
+        if not isinstance(bag, dict):
+            continue
+        if "skill_id" in bag and bag["skill_id"] is not None:
+            payload["skill_id"] = bag["skill_id"]
+        if "input_layers" in bag and bag["input_layers"] is not None:
+            payload["input_layers"] = bag["input_layers"]
+        if "candidates" in bag and bag["candidates"] is not None:
+            payload["candidates"] = bag["candidates"]
+    return payload
+
+
 def step_to_sse_payload(
     run_id: UUID | str | None,
     *,
@@ -256,14 +274,14 @@ def step_to_sse_payload(
     geo_focus: Any = None,
     ts: datetime | None = None,
 ) -> dict[str, Any]:
-    """v4 §5 SSE step payload."""
+    """v4 §5 SSE step payload (plus T11 promoted enrichment fields)."""
     when = ts or datetime.now(timezone.utc)
     if isinstance(geo_focus, str):
         try:
             geo_focus = json.loads(geo_focus)
         except (TypeError, json.JSONDecodeError):
             pass
-    return {
+    payload: dict[str, Any] = {
         "run_id": str(run_id) if run_id is not None else None,
         "seq": int(seq),
         "step_type": step_type,
@@ -273,6 +291,7 @@ def step_to_sse_payload(
         "geo_focus": geo_focus,
         "ts": when.isoformat() if hasattr(when, "isoformat") else str(when),
     }
+    return _promote_enrichment_fields(payload, tool_input, tool_output)
 
 
 def step_row_to_sse_payload(run_id: UUID | str, row: dict[str, Any]) -> dict[str, Any]:

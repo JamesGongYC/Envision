@@ -21,7 +21,17 @@ export interface Forecast {
   agent_run_id: string | null;
 }
 
-/** T4 / v4 §5 SSE step payload */
+/** Per-candidate payload on emit terminal (T11 → T12 popups). */
+export interface AgentEmitCandidate {
+  id: string;
+  location: GeoJSON.Geometry | null;
+  hazard: string;
+  probability: number | null;
+  skill: string;
+  label: string;
+}
+
+/** T4 / v4 §5 SSE step payload (+ T11 promoted enrichment fields). */
 export interface AgentStepEvent {
   run_id: string | null;
   seq: number;
@@ -31,6 +41,9 @@ export interface AgentStepEvent {
   output: unknown;
   geo_focus: GeoJSON.Geometry | null;
   ts: string;
+  skill_id?: string | null;
+  input_layers?: string[] | null;
+  candidates?: AgentEmitCandidate[] | null;
 }
 
 export interface AgentRunSummary {

@@ -32,7 +32,13 @@ function polygonPopup(props: Record<string, unknown>): string {
   return lines.join('<br/>');
 }
 
-export function PolygonSignalLayer({ config }: { config: LayerQueryConfig }) {
+export function PolygonSignalLayer({
+  config,
+  pulsing = false,
+}: {
+  config: LayerQueryConfig;
+  pulsing?: boolean;
+}) {
   const map = useMap();
   const { setTruncation } = useLayerTruncation();
   const [collection, setCollection] = useState<GeoJSONFeatureCollection | null>(
@@ -106,7 +112,7 @@ export function PolygonSignalLayer({ config }: { config: LayerQueryConfig }) {
 
   return (
     <GeoJSON
-      key={`${config.layerId}-${collection.features.length}-${zoom}`}
+      key={`${config.layerId}-${collection.features.length}-${zoom}-${pulsing ? 'pulse' : 'idle'}`}
       data={collection as GeoJSON.GeoJsonObject}
       pane={POLYGONS_PANE}
       eventHandlers={{
@@ -128,6 +134,7 @@ export function PolygonSignalLayer({ config }: { config: LayerQueryConfig }) {
         fillOpacity,
         weight: baseStyle.weight,
         opacity: Math.min(0.85, fillOpacity + 0.1),
+        className: pulsing ? 'envision-layer-pulse' : undefined,
       })}
       onEachFeature={(feature, layer) => {
         const props = (feature.properties ?? {}) as Record<string, unknown>;

@@ -18,7 +18,13 @@ function boundsToParam(bounds: L.LatLngBounds): string {
   return `${sw.lng},${sw.lat},${ne.lng},${ne.lat}`;
 }
 
-export function SignalLayer({ config }: { config: LayerQueryConfig }) {
+export function SignalLayer({
+  config,
+  pulsing = false,
+}: {
+  config: LayerQueryConfig;
+  pulsing?: boolean;
+}) {
   const map = useMap();
   const { setTruncation } = useLayerTruncation();
   const [collection, setCollection] = useState<GeoJSONFeatureCollection | null>(
@@ -93,6 +99,7 @@ export function SignalLayer({ config }: { config: LayerQueryConfig }) {
           layerId={config.layerId}
           pane={SIGNALS_PANE}
           renderer={canvasRenderer}
+          pulsing={pulsing}
         />
       ))}
     </>

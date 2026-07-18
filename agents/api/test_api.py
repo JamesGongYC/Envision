@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""T4 agent API tests — mocked DB/loop; never write prod."""
+"""T4/T9 agent API tests — mocked DB/loop; never write prod."""
 from __future__ import annotations
 
 import json
@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from agents.api.fastapi_app import create_app  # noqa: E402
 from agents.api.sse import format_sse, gated_event  # noqa: E402
+from agents.api.stream_fire import _ensure_finished  # noqa: E402
 from agents.common.agent_telemetry import step_to_sse_payload  # noqa: E402
 from agents.critic.loop import CriticResult  # noqa: E402
 from agents.forecaster.loop import ForecasterResult  # noqa: E402
@@ -39,6 +40,17 @@ def _parse_sse(body: str) -> list[dict]:
         if data_line:
             events.append(json.loads(data_line))
     return events
+
+
+def _mock_db():
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchone.return_value = (0,)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    return conn
 
 
 class AuthTests(unittest.TestCase):
@@ -65,17 +77,6 @@ class FireStreamTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(create_app())
         self.headers = {"Authorization": "Bearer test-operator-token"}
-
-    def _mock_db(self, *, in_flight: int = 0):
-        """Patch psycopg.connect for capacity check + worker."""
-        conn = MagicMock()
-        cur = MagicMock()
-        cur.fetchone.return_value = (in_flight,)
-        conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
-        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        conn.__enter__ = MagicMock(return_value=conn)
-        conn.__exit__ = MagicMock(return_value=False)
-        return conn
 
     def test_valid_fire_streams_terminal(self):
         run_id = uuid.uuid4()
@@ -124,7 +125,12 @@ class FireStreamTests(unittest.TestCase):
                 emitted_ids=steps[-1]["output"]["emitted_ids"],
             )
 
-        with patch("agents.api.routes.psycopg.connect", return_value=self._mock_db()), patch(
+        with patch(
+            "agents.api.stream_fire.psycopg.connect", return_value=_mock_db()
+        ), patch(
+            "agents.api.stream_fire.get_run",
+            return_value={"id": str(run_id), "status": "completed"},
+        ), patch(
             "agents.forecaster.loop.run_forecaster_loop", side_effect=fake_loop
         ):
             r = self.client.post("/agent/forecaster/fire", headers=self.headers)
@@ -157,7 +163,12 @@ class FireStreamTests(unittest.TestCase):
                 error="preflight_probe_failed",
             )
 
-        with patch("agents.api.routes.psycopg.connect", return_value=self._mock_db()), patch(
+        with patch(
+            "agents.api.stream_fire.psycopg.connect", return_value=_mock_db()
+        ), patch(
+            "agents.api.stream_fire.get_run",
+            return_value={"id": str(run_id), "status": "gated"},
+        ), patch(
             "agents.forecaster.loop.run_forecaster_loop", side_effect=fake_loop
         ):
             r = self.client.post("/agent/forecaster/fire", headers=self.headers)
@@ -165,20 +176,86 @@ class FireStreamTests(unittest.TestCase):
             self.assertEqual(events[-1]["step_type"], "gated")
             self.assertEqual(events[-1]["output"]["reason"], "preflight_probe_failed")
 
-    def test_max_in_flight_gated_no_loop(self):
+    def test_fire_starts_without_capacity_gate(self):
+        """T9: many ghost running rows must not block a new fire."""
+        run_id = uuid.uuid4()
+
+        def fake_loop(now, db, **kwargs):
+            on_step = kwargs.get("on_step")
+            if on_step:
+                on_step(
+                    step_to_sse_payload(
+                        run_id,
+                        seq=1,
+                        step_type="terminal",
+                        tool="emit",
+                        tool_output={"emitted_ids": []},
+                    )
+                )
+            return ForecasterResult(
+                agent_run_id=run_id,
+                status="completed",
+                step_count=1,
+                emitted_ids=[],
+            )
+
         with patch(
-            "agents.api.routes.psycopg.connect", return_value=self._mock_db(in_flight=2)
-        ), patch("agents.forecaster.loop.run_forecaster_loop") as mock_loop, patch(
-            "agents.api.routes.at_capacity", return_value=True
-        ):
+            "agents.api.stream_fire.psycopg.connect", return_value=_mock_db()
+        ), patch(
+            "agents.api.stream_fire.get_run",
+            return_value={"id": str(run_id), "status": "completed"},
+        ), patch(
+            "agents.forecaster.loop.run_forecaster_loop", side_effect=fake_loop
+        ) as mock_loop:
             r = self.client.post("/agent/forecaster/fire", headers=self.headers)
             self.assertEqual(r.status_code, 200)
             events = _parse_sse(r.text)
-            self.assertEqual(len(events), 1)
-            self.assertEqual(events[0]["step_type"], "gated")
-            self.assertEqual(events[0]["output"]["reason"], "max_in_flight")
-            self.assertIsNone(events[0]["run_id"])
-            mock_loop.assert_not_called()
+            self.assertEqual(events[-1]["step_type"], "terminal")
+            self.assertNotEqual(
+                (events[0].get("output") or {}).get("reason"), "max_in_flight"
+            )
+            mock_loop.assert_called()
+
+
+class FinalizeHelperTests(unittest.TestCase):
+    def test_ensure_finished_calls_finish_when_still_running(self):
+        run_id = uuid.uuid4()
+        conn = _mock_db()
+        with patch(
+            "agents.api.stream_fire.psycopg.connect", return_value=conn
+        ), patch(
+            "agents.api.stream_fire.get_run",
+            return_value={"id": str(run_id), "status": "running"},
+        ) as mock_get, patch(
+            "agents.api.stream_fire.finish_run"
+        ) as mock_finish:
+            _ensure_finished(
+                "postgresql://unused/unused",
+                run_id,
+                error="worker_exit_while_running",
+            )
+            mock_get.assert_called()
+            mock_finish.assert_called_once()
+            self.assertEqual(mock_finish.call_args.kwargs["status"], "failed")
+            self.assertIn("worker_exit", mock_finish.call_args.kwargs["error"])
+            conn.commit.assert_called()
+
+    def test_ensure_finished_noop_when_completed(self):
+        run_id = uuid.uuid4()
+        with patch(
+            "agents.api.stream_fire.psycopg.connect", return_value=_mock_db()
+        ), patch(
+            "agents.api.stream_fire.get_run",
+            return_value={"id": str(run_id), "status": "completed"},
+        ), patch(
+            "agents.api.stream_fire.finish_run"
+        ) as mock_finish:
+            _ensure_finished(
+                "postgresql://unused/unused",
+                run_id,
+                error="worker_exit_while_running",
+            )
+            mock_finish.assert_not_called()
 
 
 class ReplayTests(unittest.TestCase):
@@ -217,7 +294,6 @@ class ReplayTests(unittest.TestCase):
         ), patch("agents.api.routes.iter_steps", return_value=rows) as mock_steps, patch(
             "agents.api.routes.call_messages", create=True
         ):
-            # Ensure no LLM wrapper import path is exercised — patch llm if pulled
             with patch("agent.lib.llm_client.call_messages") as mock_llm:
                 r = self.client.get(f"/agent/run/{self.run_id}/replay")
                 self.assertEqual(r.status_code, 200)
@@ -241,16 +317,6 @@ class CriticFireTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(create_app())
         self.headers = {"Authorization": "Bearer test-operator-token"}
-
-    def _mock_db(self):
-        conn = MagicMock()
-        cur = MagicMock()
-        cur.fetchone.return_value = (0,)
-        conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
-        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-        conn.__enter__ = MagicMock(return_value=conn)
-        conn.__exit__ = MagicMock(return_value=False)
-        return conn
 
     def test_critic_fire_streams_terminal(self):
         run_id = uuid.uuid4()
@@ -286,7 +352,12 @@ class CriticFireTests(unittest.TestCase):
                 proposal_ids=["prop-1"],
             )
 
-        with patch("agents.api.routes.psycopg.connect", return_value=self._mock_db()), patch(
+        with patch(
+            "agents.api.stream_fire.psycopg.connect", return_value=_mock_db()
+        ), patch(
+            "agents.api.stream_fire.get_run",
+            return_value={"id": str(run_id), "status": "completed"},
+        ), patch(
             "agents.critic.loop.run_critic_loop", side_effect=fake_loop
         ):
             r = self.client.post("/agent/critic/fire", headers=self.headers)
@@ -302,10 +373,10 @@ class CriticFireTests(unittest.TestCase):
 
 class PayloadHelperTests(unittest.TestCase):
     def test_format_sse_and_gated(self):
-        ev = gated_event(reason="max_in_flight")
+        ev = gated_event(reason="preflight_probe_failed")
         text = format_sse("step", ev)
         self.assertIn("event: step", text)
-        self.assertIn("max_in_flight", text)
+        self.assertIn("preflight_probe_failed", text)
         thought = step_to_sse_payload(
             uuid.uuid4(), seq=1, step_type="thought", tool_output={"text": "x"}
         )

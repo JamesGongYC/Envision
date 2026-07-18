@@ -46,7 +46,7 @@ secret = modal.Secret.from_name("envision-neon")
 @app.function(
     image=image,
     secrets=[secret],
-    timeout=60 * 45,
+    timeout=60 * 8,
 )
 @modal.asgi_app()
 def fastapi_app():

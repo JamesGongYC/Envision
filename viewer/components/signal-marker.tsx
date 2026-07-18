@@ -20,7 +20,11 @@ function formatTime(iso: string): string {
   });
 }
 
-function divIcon(style: SignalStyle, opacity: number): L.DivIcon {
+function divIcon(
+  style: SignalStyle,
+  opacity: number,
+  pulsing: boolean
+): L.DivIcon {
   const size = style.radius * 2;
   let inner = '';
   if (style.shape === 'circle') {
@@ -33,7 +37,7 @@ function divIcon(style: SignalStyle, opacity: number): L.DivIcon {
     inner = `<div style="color:${style.color};font-size:${size}px;line-height:1;opacity:${opacity};font-weight:bold">+</div>`;
   }
   return L.divIcon({
-    className: 'envision-signal-icon',
+    className: `envision-signal-icon${pulsing ? ' envision-layer-pulse' : ''}`,
     html: inner,
     iconSize: [size, size],
     iconAnchor: [size / 2, size / 2],
@@ -102,11 +106,13 @@ export function SignalFeatureMarker({
   layerId,
   pane,
   renderer,
+  pulsing = false,
 }: {
   feature: GeoJSON.Feature;
   layerId: string;
   pane?: string;
   renderer?: L.Renderer;
+  pulsing?: boolean;
 }) {
   const props = (feature.properties ?? {}) as Record<string, unknown>;
   const source = String(props.source ?? '');
@@ -131,6 +137,7 @@ export function SignalFeatureMarker({
           fillOpacity: opacity,
           weight: style.weight,
           opacity,
+          className: pulsing ? 'envision-layer-pulse' : undefined,
         }}
       >
         <Popup>{popupBody(props, layerId)}</Popup>
@@ -141,7 +148,7 @@ export function SignalFeatureMarker({
   return (
     <Marker
       position={position}
-      icon={divIcon(style, opacity)}
+      icon={divIcon(style, opacity, pulsing)}
       pane={pane}
     >
       <Popup>{popupBody(props, layerId)}</Popup>

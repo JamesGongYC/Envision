@@ -30,12 +30,12 @@ from agents.common.agent_telemetry import (
     start_run,
     step_to_sse_payload,
 )
-from agents.common.react_prose import (
-    INTENT_NUDGE,
-    NARRATION_SYSTEM_SUFFIX,
-    narration_user_prompt,
+from agents.common.prose_scrub import scrub_coord_prose
+from agents.forecaster.tools import (
+    TOOL_SCHEMAS,
+    dispatch_tool,
+    enrich_run_skill_action_input,
 )
-from agents.forecaster.tools import TOOL_SCHEMAS, dispatch_tool
 
 AGENT_MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "12"))
 
@@ -50,12 +50,13 @@ Tools:
 - run_skill(skill_id): run a skill; returns candidates (raw output is scored independently)
 - emit(selected): TERMINAL — pass selected forecast objects by id only
 
-Reasoning discipline (required every turn):
-- Before EVERY tool call, write 1–2 first-person sentences of intent: why this
-  tool, what you expect, how you will use the result. Name signals/skills.
-- Prefer exactly one tool_use per turn.
-- Never echo raw JSON in your prose.
-- Prefer inspect → list → run relevant skills → emit.
+Each turn: optionally write 1–2 first-person sentences in the text block beside
+tool_use (intent on the first turns; sense-making after observations). Always
+call exactly one tool via tool_use — never suppress tool_use because you wrote
+prose. Name places in words (e.g. "northern California", "west of Luzon").
+Never write raw lat/lng, decimal degree pairs, or N/S E/W numeric coordinates
+in prose — geometry belongs in tool payloads only.
+Prefer inspect → list → run relevant skills → emit.
 If nothing is worth emitting, call emit with an empty selected list.
 """
 
@@ -266,38 +267,11 @@ def run_forecaster_loop(
                 tool_choice={"type": "any"},
             )
 
-            thought = _extract_text(response.content)
-            tool_uses = _extract_tool_uses(response.content)
-
-            # Ordering guard: never stream action without an intent thought.
-            if tool_uses and not thought:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": INTENT_NUDGE,
-                    }
-                )
-                if abort_check(db):
-                    _step(
-                        step_type="gated",
-                        tool_output={"reason": "rolling_529_abort"},
-                    )
-                    _finish(
-                        status="gated",
-                        health_gate_state="rolling_529",
-                        step_count=seq,
-                    )
-                    return ForecasterResult(
-                        agent_run_id=run_id,
-                        status="gated",
-                        step_count=seq,
-                        error="rolling_529_abort",
-                    )
-                continue
-
+            thought = scrub_coord_prose(_extract_text(response.content))
             if thought:
                 _step(step_type="thought", tool_output={"text": thought})
 
+            tool_uses = _extract_tool_uses(response.content)
             if not tool_uses:
                 messages.append(_assistant_message_payload(response))
                 messages.append(
@@ -332,7 +306,10 @@ def run_forecaster_loop(
             terminal = False
 
             for tool_use_id, name, tool_input in tool_uses:
-                _step(step_type="action", tool=name, tool_input=tool_input)
+                action_input = tool_input
+                if name == "run_skill":
+                    action_input = enrich_run_skill_action_input(tool_input)
+                _step(step_type="action", tool=name, tool_input=action_input)
 
                 if abort_check(db):
                     _step(
@@ -379,7 +356,11 @@ def run_forecaster_loop(
                     _step(
                         step_type="terminal",
                         tool="emit",
-                        tool_output={"emitted_ids": emitted_ids},
+                        tool_output={
+                            "emitted_ids": emitted_ids,
+                            "candidates": list(observation.get("candidates") or []),
+                            "count": int(observation.get("count") or len(emitted_ids)),
+                        },
                     )
                     _finish(
                         status="completed",
@@ -392,43 +373,6 @@ def run_forecaster_loop(
                         step_count=seq,
                         emitted_ids=emitted_ids,
                     )
-
-                # Post-observation narration (non-terminal only).
-                if abort_check(db):
-                    _step(
-                        step_type="gated",
-                        tool_output={"reason": "rolling_529_abort"},
-                    )
-                    _finish(
-                        status="gated",
-                        health_gate_state="rolling_529",
-                        step_count=seq,
-                    )
-                    return ForecasterResult(
-                        agent_run_id=run_id,
-                        status="gated",
-                        step_count=seq,
-                        error="rolling_529_abort",
-                    )
-                narr_resp, _ = call_llm(
-                    call_site="forecaster",
-                    db=db,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": narration_user_prompt(name, observation),
-                        }
-                    ],
-                    model=DEFAULT_REASONING_MODEL,
-                    fallback_model=DEFAULT_HAIKU,
-                    max_tokens=300,
-                    system=SYSTEM_PROMPT + NARRATION_SYSTEM_SUFFIX,
-                    tools=None,
-                    tool_choice=None,
-                )
-                narration = _extract_text(narr_resp.content)
-                if narration:
-                    _step(step_type="thought", tool_output={"text": narration})
 
             messages.append({"role": "user", "content": tool_results})
             if terminal:

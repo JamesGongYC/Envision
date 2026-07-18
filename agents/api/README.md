@@ -8,6 +8,8 @@ Operator-gated live fire + public replay SSE for the forecaster and critic.
 python -m modal deploy agents/api/app.py
 ```
 
+ASGI function timeout is **8 minutes** (hard cap on a fire/SSE hold).
+
 ## Secret
 
 `envision-neon` must include `ENVISION_OPERATOR_TOKEN` (Bearer for fire routes).
@@ -23,8 +25,20 @@ python -m modal secret create envision-neon \
   FIRMS_MAP_KEY='<firms-map-key>'
 ```
 
-Optional: `AGENT_MAX_IN_FLIGHT` (default 2), LLM gate / generator vars as in
+Optional LLM gate / generator vars as in
 [`agent/modal_skills/README.md`](../agent/modal_skills/README.md).
+
+There is **no** `AGENT_MAX_IN_FLIGHT` gate (removed in T9). Provider health-gate
+`gated` events from the loops still apply.
+
+If old deploys left stuck rows:
+
+```sql
+UPDATE agent_run
+SET status = 'failed', finished_at = now(), error = 'stale_running_reaped'
+WHERE status = 'running'
+  AND started_at < now() - interval '15 minutes';
+```
 
 ## Routes
 

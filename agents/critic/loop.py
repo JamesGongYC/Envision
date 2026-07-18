@@ -28,11 +28,7 @@ from agents.common.agent_telemetry import (
     start_run,
     step_to_sse_payload,
 )
-from agents.common.react_prose import (
-    INTENT_NUDGE,
-    NARRATION_SYSTEM_SUFFIX,
-    narration_user_prompt,
-)
+from agents.common.prose_scrub import scrub_coord_prose
 from agents.critic.tools import TOOL_SCHEMAS, dispatch_tool
 
 AGENT_MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "12"))
@@ -50,11 +46,12 @@ Tools:
 - generate_skill(disaster_class, seed): TERMINAL only when operator-seeded;
   refused on a plain daily tick without the generator gate
 
-Reasoning discipline (required every turn):
-- Before EVERY tool call, write 1–2 first-person sentences of intent: why this
-  tool, what you expect, how you will use the result. Name skills and metrics.
-- Prefer exactly one tool_use per turn.
-- Never echo raw JSON in your prose.
+Each turn: optionally write 1–2 first-person sentences in the text block beside
+tool_use (intent on the first turns; sense-making after observations). Always
+call exactly one tool via tool_use — never suppress tool_use because you wrote
+prose. Name places in words when discussing geography.
+Never write raw lat/lng, decimal degree pairs, or N/S E/W numeric coordinates
+in prose.
 Prefer mutate on underperforming or frequently-overridden skills.
 Never call generate_skill unless the gate allows it.
 After a successful mutate or generate, you are done.
@@ -249,37 +246,11 @@ def run_critic_loop(
                 tool_choice={"type": "any"},
             )
 
-            thought = _extract_text(response.content)
-            tool_uses = _extract_tool_uses(response.content)
-
-            if tool_uses and not thought:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": INTENT_NUDGE,
-                    }
-                )
-                if abort_check(db):
-                    _step(
-                        step_type="gated",
-                        tool_output={"reason": "rolling_529_abort"},
-                    )
-                    _finish(
-                        status="gated",
-                        health_gate_state="rolling_529",
-                        step_count=seq,
-                    )
-                    return CriticResult(
-                        agent_run_id=run_id,
-                        status="gated",
-                        step_count=seq,
-                        error="rolling_529_abort",
-                    )
-                continue
-
+            thought = scrub_coord_prose(_extract_text(response.content))
             if thought:
                 _step(step_type="thought", tool_output={"text": thought})
 
+            tool_uses = _extract_tool_uses(response.content)
             if not tool_uses:
                 messages.append(_assistant_message_payload(response))
                 messages.append(
@@ -376,42 +347,6 @@ def run_critic_loop(
                         step_count=seq,
                         proposal_ids=proposal_ids,
                     )
-
-                if abort_check(db):
-                    _step(
-                        step_type="gated",
-                        tool_output={"reason": "rolling_529_abort"},
-                    )
-                    _finish(
-                        status="gated",
-                        health_gate_state="rolling_529",
-                        step_count=seq,
-                    )
-                    return CriticResult(
-                        agent_run_id=run_id,
-                        status="gated",
-                        step_count=seq,
-                        error="rolling_529_abort",
-                    )
-                narr_resp, _ = call_llm(
-                    call_site="critic",
-                    db=db,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": narration_user_prompt(name, observation),
-                        }
-                    ],
-                    model=DEFAULT_REASONING_MODEL,
-                    fallback_model=DEFAULT_HAIKU,
-                    max_tokens=300,
-                    system=SYSTEM_PROMPT + NARRATION_SYSTEM_SUFFIX,
-                    tools=None,
-                    tool_choice=None,
-                )
-                narration = _extract_text(narr_resp.content)
-                if narration:
-                    _step(step_type="thought", tool_output={"text": narration})
 
             messages.append({"role": "user", "content": tool_results})
 

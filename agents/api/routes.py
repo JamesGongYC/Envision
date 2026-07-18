@@ -2,11 +2,7 @@
 from __future__ import annotations
 
 import os
-import queue
-import threading
 from collections.abc import Iterator
-from datetime import datetime, timezone
-from typing import Any
 from uuid import UUID
 
 import psycopg
@@ -14,13 +10,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from agents.api.auth import require_operator
-from agents.api.concurrency import at_capacity
-from agents.api.sse import format_sse, gated_event
+from agents.api.stream_fire import stream_agent_fire
 from agents.common.agent_telemetry import (
     get_run,
     iter_steps,
     step_row_to_sse_payload,
 )
+from agents.api.sse import format_sse
 
 router = APIRouter()
 
@@ -49,39 +45,12 @@ def fire_forecaster(_: None = Depends(require_operator)) -> StreamingResponse:
     """Operator-gated live forecaster run; streams ReAct steps as SSE."""
 
     def gen() -> Iterator[str]:
-        # Capacity check on a short-lived connection (no run started yet).
-        with psycopg.connect(_db_url(), autocommit=True) as db:
-            if at_capacity(db):
-                yield format_sse("step", gated_event(reason="max_in_flight"))
-                return
-
         from agents.forecaster.loop import run_forecaster_loop
 
-        q: queue.Queue[dict[str, Any] | None] = queue.Queue()
-
-        def worker() -> None:
-            try:
-                with psycopg.connect(_db_url(), autocommit=False) as db:
-                    run_forecaster_loop(
-                        datetime.now(timezone.utc),
-                        db,
-                        trigger="button",
-                        on_step=lambda payload: q.put(payload),
-                        commit_each_step=True,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                q.put(gated_event(reason=f"failed:{exc}"))
-            finally:
-                q.put(None)
-
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        while True:
-            item = q.get()
-            if item is None:
-                break
-            yield format_sse("step", item)
-        t.join(timeout=5)
+        yield from stream_agent_fire(
+            db_url=_db_url(),
+            run_loop=run_forecaster_loop,
+        )
 
     return _sse_response(gen())
 
@@ -91,38 +60,12 @@ def fire_critic(_: None = Depends(require_operator)) -> StreamingResponse:
     """Operator-gated live critic run; streams ReAct steps as SSE."""
 
     def gen() -> Iterator[str]:
-        with psycopg.connect(_db_url(), autocommit=True) as db:
-            if at_capacity(db):
-                yield format_sse("step", gated_event(reason="max_in_flight"))
-                return
-
         from agents.critic.loop import run_critic_loop
 
-        q: queue.Queue[dict[str, Any] | None] = queue.Queue()
-
-        def worker() -> None:
-            try:
-                with psycopg.connect(_db_url(), autocommit=False) as db:
-                    run_critic_loop(
-                        datetime.now(timezone.utc),
-                        db,
-                        trigger="button",
-                        on_step=lambda payload: q.put(payload),
-                        commit_each_step=True,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                q.put(gated_event(reason=f"failed:{exc}"))
-            finally:
-                q.put(None)
-
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        while True:
-            item = q.get()
-            if item is None:
-                break
-            yield format_sse("step", item)
-        t.join(timeout=5)
+        yield from stream_agent_fire(
+            db_url=_db_url(),
+            run_loop=run_critic_loop,
+        )
 
     return _sse_response(gen())
 

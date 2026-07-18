@@ -19,8 +19,47 @@ except ImportError:
 from agent.evolution.skill_loader import MODAL_SKILLS, SKILL_FOLDERS, load_skill_run
 
 from agents.common.aggregator_interface import emit_selected
+from agents.forecaster.skill_layers import input_layers_for
 
 BBox = list[float]  # [west, south, east, north] or GeoJSON Polygon dict handled separately
+
+
+def _parse_geometry(geom: Any) -> dict | None:
+    """Normalize forecast geometry to a GeoJSON dict (or None)."""
+    if geom is None:
+        return None
+    if isinstance(geom, dict) and geom.get("type"):
+        return geom
+    if isinstance(geom, str):
+        try:
+            obj = json.loads(geom)
+            if isinstance(obj, dict) and obj.get("type"):
+                return obj
+        except (TypeError, json.JSONDecodeError):
+            return None
+    return None
+
+
+def enrich_run_skill_action_input(tool_input: dict) -> dict:
+    """Attach skill_id + static input_layers for SSE / persistence."""
+    skill_id = str(tool_input.get("skill_id") or "")
+    out = dict(tool_input)
+    out["skill_id"] = skill_id
+    out["input_layers"] = input_layers_for(skill_id)
+    return out
+
+
+def candidate_popup_dict(f: Forecast) -> dict[str, Any]:
+    """Per-candidate payload for emit terminal / T12 popups."""
+    label = (f.reasoning or "").strip().split("\n")[0][:80] or f.skill_id
+    return {
+        "id": str(f.id),
+        "location": _parse_geometry(f.geometry),
+        "hazard": f.disaster_class,
+        "probability": float(f.probability) if f.probability is not None else None,
+        "skill": f.skill_id,
+        "label": label,
+    }
 
 
 def _bbox_to_geojson(bbox: BBox | dict | None) -> str | None:
@@ -276,8 +315,11 @@ def emit(
     selected: list[dict] | list[Forecast],
     agent_run_id: UUID | str,
     candidate_cache: dict[str, Forecast],
-) -> list[str]:
-    """Terminal: restore skill p from cache, hand set to aggregator stub."""
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Terminal: restore skill p from cache, hand set to aggregator stub.
+
+    Returns (emitted_ids, candidates_for_popup).
+    """
     restored: list[Forecast] = []
     for item in selected:
         if isinstance(item, Forecast):
@@ -301,7 +343,13 @@ def emit(
         continue
 
     ids = emit_selected(restored, db=db, agent_run_id=agent_run_id)
-    return [str(i) for i in ids]
+    by_id = {str(f.id): f for f in restored}
+    candidates = [
+        candidate_popup_dict(by_id[str(i)])
+        for i in ids
+        if str(i) in by_id
+    ]
+    return [str(i) for i in ids], candidates
 
 
 def _forecast_public_dict(f: Forecast) -> dict:
@@ -314,7 +362,7 @@ def _forecast_public_dict(f: Forecast) -> dict:
         "probability": f.probability,  # skill-authored; emit ignores model overrides
         "valid_from": f.valid_from.isoformat() if f.valid_from else None,
         "valid_until": f.valid_until.isoformat() if f.valid_until else None,
-        "geometry": f.geometry if isinstance(f.geometry, str) else f.geometry,
+        "geometry": _parse_geometry(f.geometry),
         "reasoning": (f.reasoning or "")[:500],
     }
 
@@ -413,14 +461,32 @@ def dispatch_tool(
             agent_run_id=agent_run_id,
             candidate_cache=candidate_cache,
         )
-        return {"candidates": serialized, "count": len(serialized)}, geo, False
+        layers = input_layers_for(skill_id)
+        return (
+            {
+                "skill_id": skill_id,
+                "input_layers": layers,
+                "candidates": serialized,
+                "count": len(serialized),
+            },
+            geo,
+            False,
+        )
     if name == "emit":
         selected = tool_input.get("selected") or []
-        ids = emit(
+        ids, candidates = emit(
             db,
             selected=selected,
             agent_run_id=agent_run_id,
             candidate_cache=candidate_cache,
         )
-        return {"emitted_ids": ids, "count": len(ids)}, None, True
+        return (
+            {
+                "emitted_ids": ids,
+                "candidates": candidates,
+                "count": len(ids),
+            },
+            None,
+            True,
+        )
     raise ValueError(f"unknown tool {name!r}")
