@@ -4,13 +4,15 @@ type FireControlProps = {
   busy: boolean;
   onFire: () => void;
   label?: string;
+  busyLabel?: string;
 };
 
-/** Operator-only fire button. Parent must only mount when canFire. */
+/** Starts a forecaster demo run (scripted) or critic fire when wired by parent. */
 export function FireControl({
   busy,
   onFire,
   label = 'Fire forecaster',
+  busyLabel = 'Playing…',
 }: FireControlProps) {
   return (
     <button
@@ -19,7 +21,7 @@ export function FireControl({
       disabled={busy}
       className="font-[family-name:var(--font-mono)] text-xs uppercase tracking-wider px-3 py-2 border border-[var(--border)] bg-[var(--surface-elevated)] text-[var(--foreground)] hover:bg-[var(--surface)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
     >
-      {busy ? 'Running…' : label}
+      {busy ? busyLabel : label}
     </button>
   );
 }

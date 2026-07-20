@@ -6,7 +6,6 @@ import {
   getRecentProposals,
   getSystemStatus,
 } from '@/lib/agent-queries';
-import { getLatestCompletedRun } from '@/lib/agent-run-queries';
 import { isCuratorEnabled } from '@/lib/kill-switch';
 import { getLineageGraph } from '@/lib/lineage-queries';
 import { getActiveForecasts, getSkillBriers } from '@/lib/queries';
@@ -34,7 +33,6 @@ export default async function AgentPage() {
 
   const [
     forecasts,
-    lastForecaster,
     briers,
     lineageGraph,
     status,
@@ -43,7 +41,6 @@ export default async function AgentPage() {
     skillCards,
   ] = await Promise.all([
     getActiveForecasts(),
-    getLatestCompletedRun('forecaster'),
     getSkillBriers(),
     getLineageGraph(),
     getSystemStatus(),
@@ -62,17 +59,12 @@ export default async function AgentPage() {
           Agent
         </h1>
         <p className="font-[family-name:var(--font-mono)] text-sm text-[var(--muted)] leading-relaxed">
-          Watch the forecaster reason over signals and skills, and the critic
-          inspect fitness. Live fire is operator-gated; the public surface
-          replays the last real run.
+          Walk through a forecaster detection pass, then inspect critic fitness
+          and proposals. Critic fire stays operator-gated.
         </p>
       </header>
 
-      <ForecasterDemo
-        canFire={canFire}
-        lastRunId={lastForecaster?.id ?? null}
-        forecasts={forecasts}
-      />
+      <ForecasterDemo forecasts={forecasts} />
 
       <CriticDemo
         canFire={canFire}

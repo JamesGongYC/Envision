@@ -44,6 +44,8 @@ export interface AgentStepEvent {
   skill_id?: string | null;
   input_layers?: string[] | null;
   candidates?: AgentEmitCandidate[] | null;
+  /** Authored pacing for scripted demo (T14); omitted on live SSE. */
+  dwell_ms?: number | null;
 }
 
 export interface AgentRunSummary {

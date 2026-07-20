@@ -18,8 +18,11 @@ const DWELL_MS: Record<AgentStepEvent['step_type'], number> = {
   terminal: 1400,
 };
 
-function dwellMs(stepType: AgentStepEvent['step_type']): number {
-  return DWELL_MS[stepType] ?? 900;
+function dwellMs(step: AgentStepEvent): number {
+  if (typeof step.dwell_ms === 'number' && step.dwell_ms >= 0) {
+    return step.dwell_ms;
+  }
+  return DWELL_MS[step.step_type] ?? 900;
 }
 
 export type RunPlayerState = {
@@ -33,7 +36,7 @@ export type RunPlayerState = {
 
 /**
  * Eased timeline over a buffered agent_step stream.
- * Live and replay share this clock; SSE only fills the buffer.
+ * Live SSE and scripted fixtures share this clock.
  */
 export function useRunPlayer(
   buffer: AgentStepEvent[],
@@ -50,7 +53,7 @@ export function useRunPlayer(
     const next = playhead + 1;
     if (next >= buffer.length) return;
 
-    const delay = playhead < 0 ? 0 : dwellMs(buffer[playhead].step_type);
+    const delay = playhead < 0 ? 0 : dwellMs(buffer[playhead]);
     const timer = window.setTimeout(() => setPlayhead(next), delay);
     return () => window.clearTimeout(timer);
   }, [buffer, buffer.length, playhead]);
@@ -58,7 +61,8 @@ export function useRunPlayer(
   return useMemo(() => {
     const visibleSteps =
       playhead < 0 ? [] : buffer.slice(0, Math.min(playhead + 1, buffer.length));
-    const active = playhead >= 0 && playhead < buffer.length ? buffer[playhead] : null;
+    const active =
+      playhead >= 0 && playhead < buffer.length ? buffer[playhead] : null;
 
     let geoFocus: GeoJSON.Geometry | null = null;
     for (const step of visibleSteps) {
@@ -68,10 +72,10 @@ export function useRunPlayer(
     let pulsingLayers: LayerId[] = [];
     if (
       active &&
-      (active.step_type === 'action' || active.step_type === 'observation') &&
-      active.tool === 'run_skill'
+      (active.step_type === 'action' || active.step_type === 'observation')
     ) {
-      pulsingLayers = toLayerIds(resolveInputLayers(active));
+      const layers = toLayerIds(resolveInputLayers(active));
+      if (layers.length > 0) pulsingLayers = layers;
     }
 
     const candidates: AgentEmitCandidate[] = [];

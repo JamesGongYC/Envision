@@ -53,7 +53,12 @@ export function CriticDemo({ canFire, briers, lineageGraph }: CriticDemoProps) {
           </p>
         </div>
         {canFire && (
-          <FireControl busy={busy} onFire={() => void startFire()} label="Fire critic" />
+          <FireControl
+            busy={busy}
+            onFire={() => void startFire()}
+            label="Fire critic"
+            busyLabel="Working…"
+          />
         )}
       </div>
 
