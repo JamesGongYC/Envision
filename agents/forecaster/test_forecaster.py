@@ -293,10 +293,12 @@ class LoopTests(unittest.TestCase):
         self.assertLess(thought_idx, action_idx)
 
     def test_tool_only_response_still_dispatches(self):
-        """T10: empty text + tool_use must still run (no intent gate)."""
+        """T10/T13: after one text retry, tools still dispatch (no forever gate)."""
         llm = ScriptedLLM(
             [
                 _tool_only_response("list_skills", {}),
+                _tool_only_response("list_skills", {}),
+                _tool_only_response("emit", {"selected": []}),
                 _tool_only_response("emit", {"selected": []}),
             ]
         )
@@ -325,6 +327,55 @@ class LoopTests(unittest.TestCase):
         self.assertIn("terminal", types)
         self.assertGreater(result.step_count, 0)
         self.assertEqual(types[0], "action")
+        self.assertGreaterEqual(llm.calls, 4)
+
+    def test_missing_text_retries_once_then_persists_thought(self):
+        """T13: tool-only triggers one nudge; retry with prose persists thought."""
+        llm = ScriptedLLM(
+            [
+                _tool_only_response("list_skills", {}),
+                _tool_response(
+                    "list_skills",
+                    {},
+                    thought="Checking the skill roster first.",
+                ),
+                _tool_response(
+                    "emit",
+                    {"selected": []},
+                    thought="Nothing worth emitting.",
+                ),
+            ]
+        )
+
+        def fake_dispatch(name, tool_input, **kwargs):
+            if name == "list_skills":
+                return [], None, False
+            if name == "emit":
+                return {
+                    "emitted_ids": [],
+                    "candidates": [],
+                    "count": 0,
+                }, None, True
+            raise AssertionError(name)
+
+        with patch("agents.forecaster.loop.dispatch_tool", fake_dispatch):
+            result = run_forecaster_loop(
+                self.now,
+                self.db,
+                trigger="operator",
+                call_llm=llm,
+                preflight=lambda db: True,
+                abort_check=lambda db: False,
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertGreaterEqual(llm.calls, 3)
+        types = [s["step_type"] for s in self.tel.steps]
+        self.assertEqual(types[0], "thought")
+        self.assertEqual(types[1], "action")
+        thought_steps = [s for s in self.tel.steps if s["step_type"] == "thought"]
+        self.assertGreaterEqual(len(thought_steps), 1)
+        self.assertIn("skill roster", thought_steps[0]["tool_output"]["text"])
 
     def test_no_tool_turn_reprompts_then_completes(self):
         """T10: thought-only turn re-prompts; does not complete with step_count=0."""

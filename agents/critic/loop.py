@@ -29,6 +29,7 @@ from agents.common.agent_telemetry import (
     step_to_sse_payload,
 )
 from agents.common.prose_scrub import scrub_coord_prose
+from agents.common.react_turn import missing_text_nudge, should_retry_for_text
 from agents.critic.tools import TOOL_SCHEMAS, dispatch_tool
 
 AGENT_MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "12"))
@@ -46,7 +47,7 @@ Tools:
 - generate_skill(disaster_class, seed): TERMINAL only when operator-seeded;
   refused on a plain daily tick without the generator gate
 
-Each turn: optionally write 1–2 first-person sentences in the text block beside
+Each turn: you MUST write 1–2 first-person sentences in the text block beside
 tool_use (intent on the first turns; sense-making after observations). Always
 call exactly one tool via tool_use — never suppress tool_use because you wrote
 prose. Name places in words when discussing geography.
@@ -234,23 +235,35 @@ def run_critic_loop(
 
     try:
         for _ in range(max_steps):
-            response, _model = call_llm(
-                call_site="critic",
-                db=db,
-                messages=messages,
-                model=DEFAULT_REASONING_MODEL,
-                fallback_model=DEFAULT_HAIKU,
-                max_tokens=2048,
-                system=SYSTEM_PROMPT,
-                tools=TOOL_SCHEMAS,
-                tool_choice={"type": "any"},
-            )
+            text_retries = 0
+            while True:
+                response, _model = call_llm(
+                    call_site="critic",
+                    db=db,
+                    messages=messages,
+                    model=DEFAULT_REASONING_MODEL,
+                    fallback_model=DEFAULT_HAIKU,
+                    max_tokens=2048,
+                    system=SYSTEM_PROMPT,
+                    tools=TOOL_SCHEMAS,
+                    tool_choice={"type": "any"},
+                )
+                thought = scrub_coord_prose(_extract_text(response.content))
+                tool_uses = _extract_tool_uses(response.content)
+                if should_retry_for_text(
+                    thought, tool_uses, text_retries=text_retries
+                ):
+                    messages.append(_assistant_message_payload(response))
+                    messages.append(
+                        {"role": "user", "content": missing_text_nudge()}
+                    )
+                    text_retries += 1
+                    continue
+                break
 
-            thought = scrub_coord_prose(_extract_text(response.content))
             if thought:
                 _step(step_type="thought", tool_output={"text": thought})
 
-            tool_uses = _extract_tool_uses(response.content)
             if not tool_uses:
                 messages.append(_assistant_message_payload(response))
                 messages.append(

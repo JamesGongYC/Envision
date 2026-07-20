@@ -241,11 +241,15 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(types[1], "action")
 
     def test_tool_only_response_still_dispatches(self):
+        """T10/T13: after one text retry, tools still dispatch (no forever gate)."""
         llm = ScriptedLLM(
             [
                 _tool_only_response(
                     "mutate_skill", {"skill_id": "wildfire_risk_elevated"}
-                )
+                ),
+                _tool_only_response(
+                    "mutate_skill", {"skill_id": "wildfire_risk_elevated"}
+                ),
             ]
         )
         mut = MagicMock()
@@ -272,6 +276,49 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(types[0], "action")
         self.assertIn("terminal", types)
         self.assertGreater(result.step_count, 0)
+        self.assertGreaterEqual(llm.calls, 2)
+
+    def test_missing_text_retries_once_then_persists_thought(self):
+        """T13: tool-only triggers one nudge; retry with prose persists thought."""
+        llm = ScriptedLLM(
+            [
+                _tool_only_response(
+                    "mutate_skill", {"skill_id": "wildfire_risk_elevated"}
+                ),
+                _tool_response(
+                    "mutate_skill",
+                    {"skill_id": "wildfire_risk_elevated"},
+                    thought="Mutating the weak skill after the nudge.",
+                ),
+            ]
+        )
+        mut = MagicMock()
+        mut.accepted = True
+        mut.proposal_id = "prop-z"
+        mut.lineage_id = "lin"
+        mut.rejection_reasons = []
+        mut.rationale = "ok"
+
+        with patch(
+            "agents.critic.tools.evolution_mutate_skill", return_value=mut
+        ):
+            result = run_critic_loop(
+                self.now,
+                self.db,
+                trigger="button",
+                call_llm=llm,
+                preflight=lambda db: True,
+                abort_check=lambda db: False,
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertGreaterEqual(llm.calls, 2)
+        types = [s["step_type"] for s in self.tel.steps]
+        self.assertEqual(types[0], "thought")
+        self.assertEqual(types[1], "action")
+        thought_steps = [s for s in self.tel.steps if s["step_type"] == "thought"]
+        self.assertEqual(len(thought_steps), 1)
+        self.assertIn("weak skill", thought_steps[0]["tool_output"]["text"])
 
     def test_no_tool_turn_reprompts_then_completes(self):
         llm = ScriptedLLM(
