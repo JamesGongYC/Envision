@@ -20,6 +20,14 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Basemap key
+
+The maps use CARTO raster tiles, which need a free API key (since Aug 2026). Without it, tiles render with an "API KEY REQUIRED" watermark.
+
+1. Get a key at https://carto.com/basemaps/apikey (no account needed).
+2. Set `NEXT_PUBLIC_CARTO_KEY` in `.env.local` and in the Vercel project env vars.
+3. Rebuild/redeploy. `NEXT_PUBLIC_` vars are inlined at build time, so a running build won't pick up a new value.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

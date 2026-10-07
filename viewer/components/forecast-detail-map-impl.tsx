@@ -2,6 +2,7 @@
 
 import { useMemo } from 'react';
 import { MapContainer, TileLayer, GeoJSON } from 'react-leaflet';
+import { cartoTileUrl, CARTO_ATTRIBUTION } from '@/lib/basemap';
 import type { LatLngBoundsLiteral } from 'leaflet';
 import type { Forecast } from '@/lib/types';
 
@@ -73,8 +74,8 @@ export default function ForecastDetailMapImpl({
       style={{ height: '100%', width: '100%' }}
     >
       <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>'
-        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+        attribution={CARTO_ATTRIBUTION}
+        url={cartoTileUrl('light_all')}
         subdomains="abcd"
         maxZoom={19}
       />
